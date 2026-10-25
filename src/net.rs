@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use tungstenite::{connect, Message};
 
-pub const APP_VERSION: &str = "0.1.0";
+pub const APP_VERSION: &str = "0.2.0";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SavedCredentials {

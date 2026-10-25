@@ -49,7 +49,7 @@ def get_version_info() -> dict:
                 return json.load(f)
         except Exception:
             pass
-    return {"version": "0.1.0", "changelog": "Pierwsze wydanie Fiksiarski Game Hub."}
+    return {"version": "0.2.0", "changelog": "Pierwsze wydanie Fiksiarski Game Hub."}
 
 
 def save_version_info(version: str, changelog: str):
