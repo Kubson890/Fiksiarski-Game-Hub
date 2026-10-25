@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Linux Game Hub
+Comment=Centrum gier karcianych i planszowych
+Exec=linux_game_hub
+Icon=linux_game_hub
+Type=Application
+Categories=Game;BoardGame;CardGame;
+Terminal=false

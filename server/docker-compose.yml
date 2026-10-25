@@ -1,0 +1,13 @@
+services:
+  gamehub-server:
+    build: .
+    container_name: fiksiarski_game_hub_server
+    restart: unless-stopped
+    ports:
+      - "47832:47832"
+    environment:
+      - SERVER_PORT=47832
+      - ADMIN_USER=admin
+      - ADMIN_PASSWORD=admin123
+    volumes:
+      - ./data:/app/data
