@@ -19,7 +19,7 @@ chmod +x AppDir/AppRun
 
 cat << 'DESKTOP' > AppDir/linux_game_hub.desktop
 [Desktop Entry]
-Name=Linux Game Hub
+Name=Fiksiarski Game Hub
 Comment=Centrum gier karcianych i planszowych
 Exec=linux_game_hub
 Icon=linux_game_hub
@@ -42,7 +42,7 @@ if [ ! -f appimagetool-x86_64.AppImage ]; then
     chmod +x appimagetool-x86_64.AppImage
 fi
 
-echo "📦 [4/4] Pakowanie do LinuxGameHub-x86_64.AppImage..."
-ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir LinuxGameHub-x86_64.AppImage
+echo "📦 [4/4] Pakowanie do FiksiarskiGameHub-x86_64.AppImage..."
+ARCH=x86_64 ./appimagetool-x86_64.AppImage --appimage-extract-and-run AppDir FiksiarskiGameHub-x86_64.AppImage
 
-echo "✅ GOTOWE! Twój plik to: ./LinuxGameHub-x86_64.AppImage"
+echo "✅ GOTOWE! Twój plik to: ./FiksiarskiGameHub-x86_64.AppImage"

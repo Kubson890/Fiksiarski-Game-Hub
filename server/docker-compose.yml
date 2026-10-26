@@ -8,6 +8,6 @@ services:
     environment:
       - SERVER_PORT=47832
       - ADMIN_USER=admin
-      - ADMIN_PASSWORD=admin123
+      - ADMIN_PASSWORD=xK9$mRv!47Qz
     volumes:
       - ./data:/app/data

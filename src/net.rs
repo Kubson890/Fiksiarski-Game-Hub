@@ -5,13 +5,17 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use tungstenite::{connect, Message};
+use sha2::{Sha256, Digest};
 
-pub const APP_VERSION: &str = "0.2.0";
+pub const APP_VERSION: &str = "0.1.0";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SavedCredentials {
     pub server_url: String,
     pub username: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
     pub password: String,
 }
 
@@ -32,6 +36,8 @@ pub struct UserProfile {
     pub ludo_wins: i32,
     pub war_wins: i32,
     pub battleship_wins: i32,
+    #[serde(default)]
+    pub token: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -75,6 +81,8 @@ pub struct NetClient {
     // --- AUTO-UPDATER ---
     pub available_update: Option<String>,
     pub update_status: String,
+    pub update_sha256: Option<String>,
+    pub auth_token: String,
     // --- MULTIPLAYER POKOJE ---
     pub available_rooms: Vec<RoomStatus>,
     pub connected_room: Option<String>,
@@ -99,6 +107,8 @@ impl Default for NetClient {
             leaderboard: Vec::new(),
             available_update: None,
             update_status: String::new(),
+            update_sha256: None,
+            auth_token: String::new(),
             available_rooms: vec![
                 RoomStatus {
                     room_id: "POKOJ1".to_string(),
@@ -136,11 +146,14 @@ impl NetClient {
         let path = Self::config_file_path();
         if let Ok(data) = std::fs::read_to_string(path) {
             if let Ok(creds) = serde_json::from_str::<SavedCredentials>(&data) {
-                if !creds.username.is_empty() && !creds.password.is_empty() {
+                if !creds.username.is_empty() && (!creds.token.is_empty() || !creds.password.is_empty()) {
                     // Jeśli w starym konfigu był port 8000, automatycznie migrujemy na 47832
                     self.server_url = creds.server_url.replace(":8000", ":47832");
                     self.username_input = creds.username;
-                    self.password_input = creds.password;
+                    self.auth_token = creds.token;
+                    if self.auth_token.is_empty() && !creds.password.is_empty() {
+                        self.password_input = creds.password;
+                    }
                     self.has_saved_account = true;
                     self.show_account_form = false;
                 }
@@ -152,10 +165,13 @@ impl NetClient {
         let creds = SavedCredentials {
             server_url: self.server_url.clone(),
             username: self.username_input.clone(),
-            password: self.password_input.clone(),
+            token: self.auth_token.clone(),
+            password: String::new(),
         };
         if let Ok(json) = serde_json::to_string_pretty(&creds) {
-            let _ = std::fs::write(Self::config_file_path(), json);
+            let path = Self::config_file_path();
+            let _ = std::fs::write(&path, json);
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
             self.has_saved_account = true;
             self.show_account_form = false;
         }
@@ -174,10 +190,13 @@ impl NetClient {
                     .get("has_binary")
                     .and_then(|b| b.as_bool())
                     .unwrap_or(false);
+                let sha256 = val.get("sha256").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 if srv_ver != APP_VERSION && has_bin {
                     self.available_update = Some(srv_ver.to_string());
+                    self.update_sha256 = if sha256.is_empty() { None } else { Some(sha256) };
                 } else {
                     self.available_update = None;
+                    self.update_sha256 = None;
                 }
             }
         }
@@ -199,6 +218,18 @@ impl NetClient {
             return;
         }
 
+        // Weryfikacja sumy kontrolnej SHA-256
+        if let Some(expected_hash) = &self.update_sha256 {
+            let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+            if actual_hash != *expected_hash {
+                self.update_status = "❌ Suma kontrolna (SHA-256) nie zgadza się! Aktualizacja odrzucona.".to_string();
+                return;
+            }
+        } else {
+            self.update_status = "❌ Brak sumy kontrolnej — nie można zweryfikować aktualizacji!".to_string();
+            return;
+        }
+
         let target_path = std::env::var("APPIMAGE")
             .ok()
             .filter(|s| !s.is_empty())
@@ -210,14 +241,15 @@ impl NetClient {
             return;
         };
 
-        let new_bin_tmp = target.with_extension("new_version");
+        let random_id: u64 = rand::random();
+        let new_bin_tmp = target.with_extension(format!("upd_{:x}", random_id));
         if std::fs::write(&new_bin_tmp, &bytes).is_err() {
             self.update_status = "❌ Brak uprawnień do zapisu w tym katalogu!".to_string();
             return;
         }
         let _ = std::fs::set_permissions(&new_bin_tmp, std::fs::Permissions::from_mode(0o755));
 
-        let updater_script = "/tmp/lgh_updater.sh";
+        let updater_script = format!("/tmp/lgh_upd_{:x}.sh", random_id);
         let script_content = format!(
             "#!/usr/bin/env bash\nsleep 0.4\nmv -f \"{}\" \"{}\"\nchmod +x \"{}\"\nexec \"{}\" &\n",
             new_bin_tmp.display(),
@@ -226,11 +258,11 @@ impl NetClient {
             target.display()
         );
 
-        if std::fs::write(updater_script, script_content).is_ok() {
+        if std::fs::write(&updater_script, script_content).is_ok() {
             let _ =
-                std::fs::set_permissions(updater_script, std::fs::Permissions::from_mode(0o755));
+                std::fs::set_permissions(&updater_script, std::fs::Permissions::from_mode(0o755));
             let _ = std::process::Command::new("bash")
-                .arg(updater_script)
+                .arg(&updater_script)
                 .spawn();
             std::process::exit(0);
         } else {
@@ -364,6 +396,20 @@ impl NetClient {
     }
 
     pub fn login_or_register(&mut self, is_register: bool) -> bool {
+        // Przy logowaniu, jeśli mamy zapisany token, spróbuj token_login
+        if !is_register && !self.auth_token.is_empty() {
+            if self.try_token_login() {
+                return true;
+            }
+            // Token wygasł — kontynuuj z loginem hasłem (jeśli użytkownik je wpisał)
+        }
+
+        if self.password_input.is_empty() {
+            self.auth_error = "Wpisz hasło, aby się zalogować.".to_string();
+            self.show_account_form = true;
+            return false;
+        }
+
         let endpoint = if is_register {
             "/api/register"
         } else {
@@ -379,8 +425,10 @@ impl NetClient {
         match ureq::post(&url).send_json(payload) {
             Ok(resp) => {
                 if let Ok(profile) = resp.into_json::<UserProfile>() {
+                    self.auth_token = profile.token.clone();
                     self.current_user = Some(profile);
                     self.auth_error.clear();
+                    self.password_input.clear(); // Wyczyść hasło z pamięci!
                     self.save_credentials();
                     self.fetch_leaderboard();
                     self.fetch_rooms();
@@ -408,13 +456,38 @@ impl NetClient {
         }
     }
 
+    fn try_token_login(&mut self) -> bool {
+        let url = format!("{}/api/token_login", self.server_url.trim_end_matches('/'));
+        let payload = serde_json::json!({
+            "username": self.username_input,
+            "token": self.auth_token,
+        });
+
+        match ureq::post(&url).send_json(payload) {
+            Ok(resp) => {
+                if let Ok(profile) = resp.into_json::<UserProfile>() {
+                    self.auth_token = profile.token.clone();
+                    self.current_user = Some(profile);
+                    self.auth_error.clear();
+                    self.save_credentials();
+                    self.fetch_leaderboard();
+                    self.fetch_rooms();
+                    self.check_for_updates();
+                    return true;
+                }
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
     pub fn report_progress(&mut self, game: &str, win_delta: i32, new_chips: Option<i32>) {
         let Some(user) = &self.current_user else { return };
         let url = format!("{}/api/stats/update", self.server_url.trim_end_matches('/'));
 
         let payload = serde_json::json!({
             "username": user.username,
-            "password": self.password_input,
+            "token": self.auth_token,
             "game": game,
             "win_delta": win_delta,
             "chips": new_chips,

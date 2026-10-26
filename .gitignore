@@ -1,1 +1,7 @@
 /target
+gamehub.db
+releases/*.AppImage
+*.AppImage
+.cargo/
+__pycache__/
+*.pyc

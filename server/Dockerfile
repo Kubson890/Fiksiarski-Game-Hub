@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir fastapi "uvicorn[standard]" pydantic python-multipart websockets
+RUN pip install --no-cache-dir fastapi "uvicorn[standard]" pydantic python-multipart websockets bcrypt
 
 COPY server.py /app/server.py
 

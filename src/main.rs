@@ -359,7 +359,10 @@ impl eframe::App for GameHubApp {
                 Screen::RoomSelect => self.render_room_select(ui),
                 Screen::Hub => self.render_hub(ui),
                 Screen::Leaderboard => self.net.render_leaderboard_ui(ui),
-                Screen::Blackjack => self.blackjack.ui(ui, &self.audio),
+                Screen::Blackjack => {
+                    self.blackjack.is_online = self.is_online_session;
+                    self.blackjack.ui(ui, &self.audio);
+                }
                 Screen::Solitaire => {
                     self.solitaire.ui(ui, &self.audio);
                     if self.solitaire.newly_won {

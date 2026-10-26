@@ -17,6 +17,7 @@ pub struct BlackjackGame {
     chips: i32,
     current_bet: i32,
     status_message: String,
+    pub is_online: bool,
 }
 
 impl Default for BlackjackGame {
@@ -29,11 +30,12 @@ impl Default for BlackjackGame {
             chips: 1000,
             current_bet: 50,
             status_message: "Postaw zakład i kliknij 'Rozdaj karty'!".to_string(),
+            is_online: false,
         }
     }
 }
 
- impl BlackjackGame {
+impl BlackjackGame {
     pub fn chips(&self) -> i32 {
         self.chips
     }
@@ -43,13 +45,12 @@ impl Default for BlackjackGame {
         if self.current_bet > self.chips && self.chips > 0 {
             self.current_bet = self.chips.min(50);
         }
-    }
-    fn calculate_score(hand: &[Card]) -> u8 {
-        let mut total: u8 = 0;
-        let mut aces: u8 = 0;
+    }    fn calculate_score(hand: &[Card]) -> u32 {
+        let mut total: u32 = 0;
+        let mut aces: u32 = 0;
 
         for card in hand.iter().filter(|c| c.face_up) {
-            total += card.rank.blackjack_value();
+            total += card.rank.blackjack_value() as u32;
             if card.rank == Rank::Ace {
                 aces += 1;
             }
@@ -206,7 +207,7 @@ impl Default for BlackjackGame {
                         .color(egui::Color32::WHITE),
                 );
 
-                if self.chips == 0 && self.state != GameState::PlayerTurn {
+                if self.chips == 0 && self.state != GameState::PlayerTurn && !self.is_online {
                     if ui.button("🎁 Odbierz darmowe 500 żetonów").clicked() {
                         audio.play(Sfx::ChipBet);
                         self.chips = 500;
