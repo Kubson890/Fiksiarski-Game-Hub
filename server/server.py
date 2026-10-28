@@ -9,7 +9,6 @@ import time
 from contextlib import contextmanager
 from collections import defaultdict
 
-# Zgodność wersji python-multipart na różnych dystrybucjach (np. Arch/CachyOS vs Debian/Docker)
 try:
     import multipart
     if "multipart.multipart" not in sys.modules:
@@ -42,46 +41,35 @@ os.makedirs(RELEASES_DIR, exist_ok=True)
 
 DB_PATH = os.path.join(DATA_DIR, "gamehub.db")
 VERSION_FILE = os.path.join(RELEASES_DIR, "version.json")
-BINARY_PATH = os.path.join(RELEASES_DIR, "LinuxGameHub.AppImage")
+
+# Osobne ścieżki dla Linuksa i Windowsa
+LINUX_BINARY_PATH = os.path.join(RELEASES_DIR, "FiksiarskiGameHub-x86_64.AppImage")
+WINDOWS_BINARY_PATH = os.path.join(RELEASES_DIR, "fiksiarski_game_hub.exe")
 
 DEFAULT_ROOMS = ["POKOJ1", "POKOJ2"]
 rooms: Dict[str, Dict[int, WebSocket]] = {r: {} for r in DEFAULT_ROOMS}
-# Kolejka miejsc w pokoju. Stoliki to stałe pary slotów (0/1 oraz 2/3),
-# więc wyjście innej osoby nie rozrywa istniejącej pary. W Chińczyku
-# grają wszystkie 4 miejsca.
 room_order: Dict[str, list[int]] = {r: [] for r in DEFAULT_ROOMS}
-# Równolegle do room_order: aktualny ekran/gra każdego miejsca
-# (hub/chess/battleship/ludo). Pozwala oznaczyć obserwatorów tylko przy
-# grze, która jest faktycznie rozgrywana.
 room_focus: Dict[str, list[str]] = {r: [] for r in DEFAULT_ROOMS}
-# Oczekujące prośby o reset — osobno dla każdego stolika (0/1) oraz
-# osobny klucz 2 dla Chińczyka, w którym gra cały pokój.
-# Wartość: {"from_seat": int, "from_slot": int, "game": str} albo None.
 room_resets: Dict[str, Dict[int, dict | None]] = {
     r: {0: None, 1: None, 2: None} for r in DEFAULT_ROOMS
 }
 
-# Gry 2-osobowe — każdy stolik (slot 0/1 i 2/3) gra niezależnie.
 TWO_PLAYER_GAMES = {"chess", "battleship"}
-
-# Gry, dla których klient może wysyłać stan i prosić o reset.
 KNOWN_GAMES = {"chess", "battleship", "ludo"}
 
-# --- Prosta ochrona przed brute-force: max 10 prób logowania / IP / minutę ---
 _login_attempts: dict = defaultdict(list)
 _LOGIN_LIMIT = 10
-_LOGIN_WINDOW = 60  # sekund
+_LOGIN_WINDOW = 60
 
 
 def _check_rate_limit(ip: str):
     now = time.time()
     attempts = _login_attempts[ip]
-    # Wyczyść stare próby poza oknem czasowym
     _login_attempts[ip] = [t for t in attempts if now - t < _LOGIN_WINDOW]
     if len(_login_attempts[ip]) >= _LOGIN_LIMIT:
         raise HTTPException(
             status_code=429,
-            detail=f"Zbyt wiele prób logowania. Spróbuj ponownie za chwilę."
+            detail="Zbyt wiele prób logowania. Spróbuj ponownie za chwilę."
         )
     _login_attempts[ip].append(now)
 
@@ -111,6 +99,16 @@ def get_version_info() -> dict:
 def save_version_info(version: str, changelog: str):
     with open(VERSION_FILE, "w", encoding="utf-8") as f:
         json.dump({"version": version.strip(), "changelog": changelog.strip()}, f)
+
+
+def _file_sha256(path: str) -> str:
+    if not os.path.exists(path):
+        return ""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 @contextmanager
@@ -167,7 +165,6 @@ def check_pw(password: str, stored_hash: str) -> bool:
             _, iters, salt, h = parts
             computed = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), int(iters)).hex()
             return secrets.compare_digest(computed, h)
-    # Legacy: plain SHA-256 (auto-migrated on next login)
     legacy = hashlib.sha256(password.encode("utf-8")).hexdigest()
     return secrets.compare_digest(legacy, stored_hash)
 
@@ -251,11 +248,9 @@ def login(req: AuthRequest, request: Request):
         if user["banned"] == 1:
             raise HTTPException(status_code=403, detail="To konto zostało zablokowane przez Admina!")
 
-        # If legacy hash matched, upgrade to secure salted hash (bcrypt or PBKDF2)
         if not (user["password_hash"].startswith("$2") or (not HAS_BCRYPT and user["password_hash"].startswith("pbkdf2$"))):
             conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_pw(req.password), user["id"]))
 
-        # Generate new token
         token = secrets.token_hex(32)
         conn.execute("UPDATE users SET token = ? WHERE id = ?", (token, user["id"]))
         conn.commit()
@@ -339,37 +334,43 @@ def list_rooms():
 
 
 @app.get("/api/version")
-def check_version():
+def check_version(platform: str = "linux"):
     info = get_version_info()
-    has_binary = os.path.exists(BINARY_PATH)
-    sha256 = ""
-    if has_binary:
-        h = hashlib.sha256()
-        with open(BINARY_PATH, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                h.update(chunk)
-        sha256 = h.hexdigest()
+    # Rozpoznajemy platformę klienta (domyślnie linux, opcjonalnie windows)
+    is_win = platform.lower() == "windows"
+    bin_path = WINDOWS_BINARY_PATH if is_win else LINUX_BINARY_PATH
+    has_binary = os.path.exists(bin_path)
+    sha256 = _file_sha256(bin_path)
+
     return {
         "version": info["version"],
         "changelog": info["changelog"],
         "has_binary": has_binary,
         "sha256": sha256,
+        "platform": "windows" if is_win else "linux",
     }
 
 
 @app.get("/api/download_update")
-def download_update():
-    if not os.path.exists(BINARY_PATH):
-        raise HTTPException(status_code=404, detail="Brak wgranego pliku aktualizacji na serwerze!")
+def download_update(platform: str = "linux"):
+    is_win = platform.lower() == "windows"
+    bin_path = WINDOWS_BINARY_PATH if is_win else LINUX_BINARY_PATH
+    filename = "fiksiarski_game_hub.exe" if is_win else "FiksiarskiGameHub-x86_64.AppImage"
+
+    if not os.path.exists(bin_path):
+        raise HTTPException(
+            status_code=404, 
+            detail=f"Brak pliku aktualizacji dla platformy: {'Windows' if is_win else 'Linux'}!"
+        )
+
     return FileResponse(
-        BINARY_PATH,
+        bin_path,
         media_type="application/octet-stream",
-        filename="LinuxGameHub.AppImage",
+        filename=filename,
     )
 
 
 def _focus_list(room_id: str) -> list[str]:
-    """Zwraca listę focusów wyrównaną do długości kolejki miejsc."""
     order = room_order.get(room_id, [])
     focus = list(room_focus.get(room_id, []))
     if len(focus) < len(order):
@@ -378,7 +379,6 @@ def _focus_list(room_id: str) -> list[str]:
 
 
 def _slot_focus(room_id: str, slot: int) -> str | None:
-    """Aktualny ekran/gra konkretnego slotu (nie pozycji w kolejce)."""
     order = room_order.get(room_id, [])
     try:
         idx = order.index(slot)
@@ -389,7 +389,6 @@ def _slot_focus(room_id: str, slot: int) -> str | None:
 
 
 def _pair_active(room_id: str, pair: int, game: str) -> bool:
-    """Czy oba stale miejsca stolika mają otwartą tę samą grę."""
     if pair not in (0, 1):
         return False
     return (
@@ -416,7 +415,6 @@ async def _broadcast_json(room_id: str, payload: dict, exclude_slot: int | None 
         try:
             await client.send_text(data)
         except Exception:
-            # Zerwane połączenie zostanie sprzątnięte przez jego własny handler.
             pass
 
 
@@ -425,7 +423,6 @@ async def _broadcast_room_state(room_id: str, exclude_slot: int | None = None):
 
 
 async def _prune_room_resets(room_id: str):
-    """Anuluje głosowania, które straciły ważność (wyjście/zmiana gry)."""
     resets = room_resets.get(room_id, {})
     for key, pending in list(resets.items()):
         if pending is None:
@@ -446,7 +443,6 @@ async def _prune_room_resets(room_id: str):
 
 @app.websocket("/ws/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: str):
-    # Akceptujemy tylko zdefiniowane pokoje — odrzucamy próby tworzenia arbitralnych pokoi
     if room_id not in DEFAULT_ROOMS:
         await websocket.close(code=1008)
         return
@@ -461,8 +457,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
         await websocket.close(code=1008)
         return
 
-    # Rezerwujemy miejsce przed await, żeby dwa równoczesne połączenia
-    # nie wybrały tego samego slotu.
     rooms[room_id][free_slot] = websocket
     try:
         await websocket.accept()
@@ -485,8 +479,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
         "focus": _focus_list(room_id),
     }))
 
-    # Pozostali dostają aktualny skład pokoju. Dzięki temu wiedzą,
-    # czy ktoś tylko dołączył jako obserwator, czy zmienił się skład graczy.
     await _broadcast_room_state(room_id, exclude_slot=free_slot)
 
     try:
@@ -510,9 +502,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
             seat = room_order[room_id].index(free_slot)
             event_type = parsed["type"]
 
-            # Zmiana ekranu/aktualnie otwartej gry. Nie przerywa gry — służy
-            # tylko do tego, by licznik obserwatorów pokazywał się wyłącznie
-            # przy grze, w której faktycznie są gracze.
             if event_type == "FocusGame":
                 game = str(parsed.get("game", ""))
                 if game not in {"hub", "chess", "battleship", "ludo"}:
@@ -525,15 +514,11 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     await _prune_room_resets(room_id)
                 continue
 
-            # Stolik = para stałych slotów: 0/1 oraz 2/3. Dzięki temu pary
-            # nie rozpadają się, gdy ktoś inny wyjdzie z pokoju.
             requested_pair_raw = parsed.get("pair")
             pair = free_slot // 2
             parsed["pair"] = pair
             parsed["from_seat"] = free_slot % 2
 
-            # Ruchy w grach 2-osobowych może wysyłać tylko gracz ze stolika,
-            # którego obaj członkowie mają otwartą tę samą grę.
             event_game = {
                 "ChessMove": "chess",
                 "BattleshipFleet": "battleship",
@@ -542,15 +527,12 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
             if event_game is not None and not _pair_active(room_id, pair, event_game):
                 continue
 
-            # Wojna pozostaje grą pierwszego stolika (brak osobnej synchronizacji).
             if event_type == "WarStep" and pair != 0:
                 continue
 
             if event_type in {"LudoRoll", "LudoMove"}:
-                # Chińczyk rozgrywany jest przez cały pokój.
                 parsed["pair"] = 2
 
-            # --- Głosowanie nad resetem: osobna prośba dla każdego stolika ---
             broadcast_to_all = False
             if event_type in {"ResetRequest", "ResetApproved", "ResetDeclined"}:
                 game = str(parsed.get("game", ""))
@@ -562,13 +544,11 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     if not _pair_active(room_id, reset_key, game):
                         continue
                 else:
-                    # Chińczyk: wspólne głosowanie całego pokoju.
                     reset_key = 2
 
                 pending = room_resets[room_id].get(reset_key)
 
                 if event_type == "ResetRequest":
-                    # Pierwsza prośba wygrywa; kolejną można wysłać po odrzuceniu.
                     if pending is not None:
                         continue
                     room_resets[room_id][reset_key] = {
@@ -577,32 +557,22 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                         "game": game,
                     }
                 else:
-                    # Zgoda/odrzucenie musi dotyczyć istniejącej prośby.
                     if pending is None:
                         continue
                     game = pending["game"]
-                    # Nie można głosować na własną prośbę (porównujemy slot,
-                    # bo pozycje w kolejce mogą się zmienić).
                     if free_slot == pending.get("from_slot"):
                         continue
-                    # Nie można podmienić gry w trakcie głosowania.
                     claimed = str(parsed.get("game", ""))
                     if claimed and claimed != game:
                         continue
                     room_resets[room_id][reset_key] = None
-                    # Wynik głosowania dostają wszyscy, także głosujący —
-                    # dopiero ten pakiet uruchamia reset u klientów.
                     broadcast_to_all = True
 
-                # Ujednolicamy pole gry, żeby klient wiedział, czego dotyczy głos.
                 parsed["game"] = game
                 parsed["pair"] = reset_key
                 if event_type == "ResetRequest":
-                    # Nie ufamy numerowi gracza przysłanemu przez klienta.
                     parsed["from_player"] = free_slot % 2
 
-            # Obserwator nie może rozsyłać stanu gry; snapshoty dotyczą
-            # konkretnego stolika, więc odpowiedzieć mogą tylko jego gracze.
             if event_type in {"StateRequest", "GameState"}:
                 game = str(parsed.get("game", ""))
                 if game not in KNOWN_GAMES:
@@ -623,7 +593,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                             continue
                         parsed["pair"] = pair
                 else:
-                    # Chińczyk: stan wysyła gracz, nie obserwator.
                     if event_type == "GameState" and seat >= 4:
                         continue
                     parsed["pair"] = 2
@@ -640,7 +609,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
     except WebSocketDisconnect:
         pass
     finally:
-        # Sprzątamy miejsce niezależnie od sposobu rozłączenia.
         if room_id in rooms and free_slot in rooms[room_id]:
             del rooms[room_id][free_slot]
         if room_id in room_order and free_slot in room_order[room_id]:
@@ -651,446 +619,10 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 room_focus[room_id].pop(focus_idx)
 
         await _broadcast_room_state(room_id)
-        # Prośba o reset nie może przetrwać wyjścia autora ani rozpadu stolika.
         await _prune_room_resets(room_id)
 
 
-# --- STRONA GŁÓWNA ---
-
-@app.get("/", response_class=HTMLResponse)
-def home_page():
-    ver_info = get_version_info()
-    has_binary = os.path.exists(BINARY_PATH)
-    version_str = ver_info.get("version", "0.1.0")
-    github_url = "https://github.com/Kubson890/Fiksiarski-Game-Hub"
-    download_url = "/api/download_update" if has_binary else f"{github_url}/releases"
-    download_label = f"⬇ Pobierz v{version_str} (AppImage)" if has_binary else "⬇ Pobierz z GitHub Releases"
-
-    return f"""
-    <!DOCTYPE html>
-    <html lang="pl">
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Fiksiarski Game Hub — Klasyczne Gry na Linuksa</title>
-        <style>
-            :root {{
-                --bg: #11111b;
-                --surface: #181825;
-                --card-bg: #1e1e2e;
-                --card-hover: #26263b;
-                --border: #313244;
-                --text: #cdd6f4;
-                --subtext: #a6adc8;
-                --accent: #89b4fa;
-                --green: #a6e3a1;
-                --gold: #f9e2af;
-                --red: #f38ba8;
-            }}
-            * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-            body {{
-                font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-                background-color: var(--bg);
-                color: var(--text);
-                line-height: 1.6;
-                padding-bottom: 60px;
-            }}
-            a {{ color: inherit; text-decoration: none; }}
-
-            /* NAVBAR */
-            nav {{
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                max-width: 1140px;
-                margin: 0 auto;
-                padding: 24px 20px;
-                border-bottom: 1px solid var(--border);
-            }}
-            .logo {{
-                font-size: 1.4rem;
-                font-weight: 800;
-                color: var(--accent);
-                display: flex;
-                align-items: center;
-                gap: 10px;
-            }}
-            .nav-links {{
-                display: flex;
-                gap: 20px;
-                align-items: center;
-            }}
-            .nav-link {{
-                color: var(--subtext);
-                font-weight: 500;
-                transition: color 0.2s;
-            }}
-            .nav-link:hover {{ color: var(--accent); }}
-            .admin-btn {{
-                background: #313244;
-                color: var(--text);
-                padding: 7px 14px;
-                border-radius: 8px;
-                font-size: 0.9rem;
-                font-weight: 600;
-                transition: background 0.2s;
-            }}
-            .admin-btn:hover {{ background: #45475a; }}
-
-            /* HERO */
-            .hero {{
-                text-align: center;
-                max-width: 860px;
-                margin: 70px auto 50px auto;
-                padding: 0 20px;
-            }}
-            .version-pill {{
-                display: inline-block;
-                background: rgba(137, 180, 250, 0.12);
-                color: var(--accent);
-                border: 1px solid rgba(137, 180, 250, 0.3);
-                padding: 6px 14px;
-                border-radius: 20px;
-                font-size: 0.88rem;
-                font-weight: 600;
-                margin-bottom: 24px;
-            }}
-            h1 {{
-                font-size: 3rem;
-                font-weight: 900;
-                letter-spacing: -0.5px;
-                color: #ffffff;
-                margin-bottom: 20px;
-                line-height: 1.2;
-            }}
-            .hero-desc {{
-                font-size: 1.15rem;
-                color: var(--subtext);
-                margin-bottom: 34px;
-                max-width: 720px;
-                margin-left: auto;
-                margin-right: auto;
-            }}
-            .cta-group {{
-                display: flex;
-                gap: 14px;
-                justify-content: center;
-                flex-wrap: wrap;
-            }}
-            .btn {{
-                display: inline-flex;
-                align-items: center;
-                gap: 10px;
-                padding: 13px 26px;
-                border-radius: 10px;
-                font-weight: 700;
-                font-size: 1.05rem;
-                transition: transform 0.15s, box-shadow 0.15s, background 0.2s;
-            }}
-            .btn:hover {{
-                transform: translateY(-2px);
-                box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-            }}
-            .btn-primary {{
-                background: var(--green);
-                color: #11111b;
-            }}
-            .btn-primary:hover {{ background: #b4f0b0; }}
-            .btn-secondary {{
-                background: var(--card-bg);
-                color: var(--text);
-                border: 1px solid var(--border);
-            }}
-            .btn-secondary:hover {{
-                background: var(--card-hover);
-                border-color: var(--accent);
-            }}
-
-            /* SECTION WRAPPER */
-            .section {{
-                max-width: 1140px;
-                margin: 60px auto 0 auto;
-                padding: 0 20px;
-            }}
-            .section-title {{
-                text-align: center;
-                margin-bottom: 36px;
-            }}
-            .section-title h2 {{
-                font-size: 2rem;
-                color: #fff;
-                margin-bottom: 8px;
-            }}
-            .section-title p {{
-                color: var(--subtext);
-                font-size: 1.05rem;
-            }}
-
-            /* GAMES GRID */
-            .games-grid {{
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-                gap: 22px;
-            }}
-            .game-card {{
-                background: var(--card-bg);
-                border: 1px solid var(--border);
-                border-radius: 14px;
-                padding: 26px;
-                transition: transform 0.2s, border-color 0.2s, background 0.2s;
-                position: relative;
-                overflow: hidden;
-            }}
-            .game-card:hover {{
-                transform: translateY(-3px);
-                border-color: var(--accent);
-                background: var(--card-hover);
-            }}
-            .game-icon {{
-                font-size: 2.8rem;
-                margin-bottom: 12px;
-                display: inline-block;
-            }}
-            .game-name {{
-                font-size: 1.35rem;
-                font-weight: 700;
-                color: #fff;
-                margin-bottom: 6px;
-            }}
-            .game-badge {{
-                display: inline-block;
-                font-size: 0.75rem;
-                font-weight: 700;
-                text-transform: uppercase;
-                letter-spacing: 0.6px;
-                padding: 3px 8px;
-                border-radius: 6px;
-                margin-bottom: 12px;
-                background: rgba(249, 226, 175, 0.15);
-                color: var(--gold);
-            }}
-            .game-desc {{
-                color: var(--subtext);
-                font-size: 0.95rem;
-                line-height: 1.5;
-            }}
-
-            /* FEATURES GRID */
-            .features-grid {{
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                gap: 20px;
-            }}
-            .feature-box {{
-                background: var(--surface);
-                border: 1px solid var(--border);
-                border-radius: 12px;
-                padding: 24px;
-                text-align: center;
-            }}
-            .feature-icon {{
-                font-size: 2.2rem;
-                margin-bottom: 10px;
-            }}
-            .feature-title {{
-                font-size: 1.15rem;
-                font-weight: 700;
-                color: #fff;
-                margin-bottom: 8px;
-            }}
-            .feature-desc {{
-                font-size: 0.9rem;
-                color: var(--subtext);
-            }}
-
-            /* CODE BOX */
-            .code-box {{
-                background: #0c0c14;
-                border: 1px solid var(--border);
-                border-radius: 10px;
-                padding: 16px 20px;
-                font-family: monospace;
-                font-size: 0.95rem;
-                color: var(--green);
-                overflow-x: auto;
-                margin: 20px auto;
-                max-width: 600px;
-                text-align: left;
-            }}
-
-            /* FOOTER */
-            footer {{
-                max-width: 1140px;
-                margin: 80px auto 0 auto;
-                padding: 30px 20px 0 20px;
-                border-top: 1px solid var(--border);
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                flex-wrap: wrap;
-                gap: 16px;
-                color: var(--subtext);
-                font-size: 0.9rem;
-            }}
-            footer a:hover {{ color: var(--accent); }}
-        </style>
-    </head>
-    <body>
-        <nav>
-            <div class="logo">
-                <span>🎮</span>
-                <span>Fiksiarski Game Hub</span>
-            </div>
-            <div class="nav-links">
-                <a href="#gry" class="nav-link">Gry</a>
-                <a href="#funkcje" class="nav-link">Funkcje</a>
-                <a href="{github_url}" target="_blank" rel="noopener noreferrer" class="nav-link">GitHub 🐙</a>
-                <a href="/admin" class="admin-btn">🔐 Panel Admina</a>
-            </div>
-        </nav>
-
-        <header class="hero">
-            <span class="version-pill">🎉 Wersja v{version_str} • Gotowy dla Linuksa</span>
-            <h1>Klasyczne Gry na Linuksa w Nowoczesnym Wydaniu</h1>
-            <p class="hero-desc">
-                Lekkie, ultraszybkie centrum gier planszowych i karcianych napisane w języku <b>Rust</b>. 
-                Graj solo z inteligentnymi botami lub twórz pokoje i rywalizuj ze znajomymi w czasie rzeczywistym!
-            </p>
-            <div class="cta-group">
-                <a href="{download_url}" class="btn btn-primary">{download_label}</a>
-                <a href="{github_url}" target="_blank" rel="noopener noreferrer" class="btn btn-secondary">
-                    <span>🐙 Zobacz na GitHubie</span>
-                </a>
-            </div>
-        </header>
-
-        <section id="gry" class="section">
-            <div class="section-title">
-                <h2>6 Dostępnych Gier</h2>
-                <p>Od strategicznych potyczek po emocjonujące gry karciane</p>
-            </div>
-            <div class="games-grid">
-                <div class="game-card">
-                    <span class="game-icon">♟️</span>
-                    <h3 class="game-name">Szachy</h3>
-                    <span class="game-badge">AI Bot • Multiplayer</span>
-                    <p class="game-desc">
-                        Pojedynki na szachownicy z pełną obsługą zasad, legalnymi ruchami, 
-                        podglądem historii, botem AI z ewaluacją pozycji lub z żywym przeciwnikiem przez sieć.
-                    </p>
-                </div>
-
-                <div class="game-card">
-                    <span class="game-icon">🚢</span>
-                    <h3 class="game-name">Statki (Battleship)</h3>
-                    <span class="game-badge">Taktyczna • Radar</span>
-                    <p class="game-desc">
-                        Prawdziwa bitwa morska na siatkach 10x10. Rozstawiaj własną flotę ręcznie lub losowo 
-                        i skanuj radar wroga, zatapiając kolejne okręty przeciwnika.
-                    </p>
-                </div>
-
-                <div class="game-card">
-                    <span class="game-icon">🎲</span>
-                    <h3 class="game-name">Chińczyk (Ludo)</h3>
-                    <span class="game-badge">2-4 Graczy • Kostka</span>
-                    <p class="game-desc">
-                        Ponadczasowa gra planszowa dla 2 do 4 graczy. Dynamiczne rzuty kostką, bezpieczne pola, 
-                        zbijanie pionków rywali i wyścig do domków.
-                    </p>
-                </div>
-
-                <div class="game-card">
-                    <span class="game-icon">🃏</span>
-                    <h3 class="game-name">Pasjans (Klondike)</h3>
-                    <span class="game-badge">Solo • Drag & Drop</span>
-                    <p class="game-desc">
-                        Najpopularniejszy klasyczny Pasjans z wygodnym przeciąganiem kart, 
-                        błyskawicznymi ruchami podwójnym kliknięciem i płynnymi animacjami lotu kart.
-                    </p>
-                </div>
-
-                <div class="game-card">
-                    <span class="game-icon">🎰</span>
-                    <h3 class="game-name">Blackjack (21)</h3>
-                    <span class="game-badge">Kasyno • Żetony</span>
-                    <p class="game-desc">
-                        Sprawdź swoje szczęście w blackjacku przeciwko krupierowi. Stawiaj żetony, 
-                        dobieraj (Hit), pasuj (Stand), podwajaj stawkę (Double Down) i wspinaj się w rankingu.
-                    </p>
-                </div>
-
-                <div class="game-card">
-                    <span class="game-icon">⚔️</span>
-                    <h3 class="game-name">Wojna (War)</h3>
-                    <span class="game-badge">Karty • Szybka Akcja</span>
-                    <p class="game-desc">
-                        Emocjonujący pojedynek o całą talię kart. Rozstrzygaj wojny, przejmuj stosy kart 
-                        i korzystaj z trybu szybkiej automatycznej rozgrywki.
-                    </p>
-                </div>
-            </div>
-        </section>
-
-        <section id="funkcje" class="section">
-            <div class="section-title">
-                <h2>Dlaczego Fiksiarski Game Hub?</h2>
-                <p>Zbudowany z myślą o prostocie, prędkości i dobrej zabawie</p>
-            </div>
-            <div class="features-grid">
-                <div class="feature-box">
-                    <div class="feature-icon">⚡</div>
-                    <h3 class="feature-title">Czysty Rust & egui</h3>
-                    <p class="feature-desc">Brak ociężałego Electrona. Aplikacja zużywa minimalną ilość pamięci RAM i uruchamia się natychmiastowo.</p>
-                </div>
-                <div class="feature-box">
-                    <div class="feature-icon">🌐</div>
-                    <h3 class="feature-title">Pokoje Multiplayer</h3>
-                    <p class="feature-desc">Wspólne pokoje oparte na WebSocket pozwalają na płynną rozgrywkę wieloosobową bez zbędnej konfiguracji.</p>
-                </div>
-                <div class="feature-box">
-                    <div class="feature-icon">🏆</div>
-                    <h3 class="feature-title">Rankingi Graczy</h3>
-                    <p class="feature-desc">Twoje wygrane w poszczególnych grach oraz zdobyte żetony są synchronizowane z globalną tabelą wyników.</p>
-                </div>
-                <div class="feature-box">
-                    <div class="feature-icon">📦</div>
-                    <h3 class="feature-title">Format AppImage</h3>
-                    <p class="feature-desc">Jeden plik uruchamialny, który działa bez instalacji na Ubuntu, Debianie, Archu, Fedorze i innych dystrybucjach.</p>
-                </div>
-            </div>
-        </section>
-
-        <section class="section" style="text-align: center;">
-            <div class="section-title">
-                <h2>Jak uruchomić?</h2>
-                <p>Tylko dwa polecenia w terminalu po pobraniu pliku AppImage:</p>
-            </div>
-            <div class="code-box">
-                chmod +x FiksiarskiGameHub-x86_64.AppImage<br>
-                ./FiksiarskiGameHub-x86_64.AppImage
-            </div>
-            <div style="margin-top: 26px;">
-                <a href="{download_url}" class="btn btn-primary">{download_label}</a>
-            </div>
-        </section>
-
-        <footer>
-            <div>
-                🎮 <b>Fiksiarski Game Hub</b> &copy; 2026. Projekt Open Source.
-            </div>
-            <div style="display: flex; gap: 20px;">
-                <a href="{github_url}" target="_blank" rel="noopener noreferrer">GitHub</a>
-                <a href="{github_url}/issues" target="_blank" rel="noopener noreferrer">Zgłoś błąd</a>
-                <a href="/admin">Panel Administratora</a>
-            </div>
-        </footer>
-    </body>
-    </html>
-    """
-
-
-# --- PANEL WEBOWY ADMINA CHRONIONY HASŁEM ---
+# --- PANEL WEBOWY ADMINA ---
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_panel(admin: str = Depends(verify_admin)):
@@ -1101,7 +633,8 @@ def admin_panel(admin: str = Depends(verify_admin)):
         """).fetchall()
 
     ver_info = get_version_info()
-    bin_status = "✅ Wgrany na serwerze" if os.path.exists(BINARY_PATH) else "⚠ Brak pliku (wgraj poniżej)"
+    linux_status = "✅ Wgrany (.AppImage)" if os.path.exists(LINUX_BINARY_PATH) else "⚠ Brak pliku"
+    win_status = "✅ Wgrany (.exe)" if os.path.exists(WINDOWS_BINARY_PATH) else "⚠ Brak pliku"
     p1_cnt = len(rooms.get("POKOJ1", {}))
     p2_cnt = len(rooms.get("POKOJ2", {}))
 
@@ -1166,13 +699,21 @@ def admin_panel(admin: str = Depends(verify_admin)):
         </div>
 
         <div class="card">
-            <h2>🚀 System Auto-Aktualizacji (Wypuść nową wersję gry)</h2>
-            <p>Aktualna wersja na serwerze: <b style="color:#a6e3a1;">v{ver_info['version']}</b> &nbsp;|&nbsp; Plik AppImage: <b>{bin_status}</b></p>
-            <form method="post" action="/admin/publish_release" enctype="multipart/form-data" style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
-                <label>Nowa wersja: <input type="text" name="version" value="{ver_info['version']}" required style="width:90px;"></label>
-                <label>Opis zmian: <input type="text" name="changelog" value="{ver_info['changelog']}" style="width:280px;"></label>
-                <label>Plik AppImage / Binarka: <input type="file" name="binary_file"></label>
-                <button type="submit" style="background:#a6e3a1; color:#11111b; font-weight:bold; border:none; padding:8px 16px; border-radius:6px; cursor:pointer;">⬆ Opublikuj aktualizację</button>
+            <h2>🚀 System Auto-Aktualizacji (Multiplatform)</h2>
+            <p>Aktualna wersja na serwerze: <b style="color:#a6e3a1;">v{ver_info['version']}</b></p>
+            <p>Linux (.AppImage): <b>{linux_status}</b> &nbsp;|&nbsp; Windows (.exe): <b>{win_status}</b></p>
+            <form method="post" action="/admin/publish_release" enctype="multipart/form-data" style="display:flex; flex-direction:column; gap:12px; margin-top:12px;">
+                <div style="display:flex; gap:16px; flex-wrap:wrap;">
+                    <label>Wersja: <input type="text" name="version" value="{ver_info['version']}" required style="width:90px;"></label>
+                    <label>Opis zmian: <input type="text" name="changelog" value="{ver_info['changelog']}" style="width:320px;"></label>
+                </div>
+                <div style="display:flex; gap:16px; flex-wrap:wrap;">
+                    <label>🐧 Plik Linux (.AppImage): <input type="file" name="linux_file"></label>
+                    <label>🪟 Plik Windows (.exe): <input type="file" name="windows_file"></label>
+                </div>
+                <div>
+                    <button type="submit" style="background:#a6e3a1; color:#11111b; font-weight:bold; border:none; padding:8px 18px; border-radius:6px; cursor:pointer;">⬆ Opublikuj aktualizację</button>
+                </div>
             </form>
         </div>
 
@@ -1206,14 +747,20 @@ def admin_panel(admin: str = Depends(verify_admin)):
 async def admin_publish_release(
     version: str = Form(...),
     changelog: str = Form(""),
-    binary_file: UploadFile | None = File(None),
+    linux_file: UploadFile | None = File(None),
+    windows_file: UploadFile | None = File(None),
     _admin: str = Depends(verify_admin),
 ):
     save_version_info(version, changelog)
-    if binary_file and binary_file.filename:
-        content = await binary_file.read()
+    if linux_file and linux_file.filename:
+        content = await linux_file.read()
         if len(content) > 0:
-            with open(BINARY_PATH, "wb") as f:
+            with open(LINUX_BINARY_PATH, "wb") as f:
+                f.write(content)
+    if windows_file and windows_file.filename:
+        content = await windows_file.read()
+        if len(content) > 0:
+            with open(WINDOWS_BINARY_PATH, "wb") as f:
                 f.write(content)
     return RedirectResponse(url="/admin", status_code=303)
 

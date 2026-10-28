@@ -1,6 +1,7 @@
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -125,7 +126,6 @@ pub enum NetEvent {
         pair: usize,
     },
     /// Informuje serwer, na jakim ekranie/grze znajduje się dane miejsce.
-    /// Serwer dzięki temu wie, która gra jest faktycznie rozgrywana.
     FocusGame {
         game: String,
     },
@@ -168,7 +168,6 @@ pub struct NetClient {
     /// Pozycja w kolejce pokoju (0..3). Pierwsze 2 osoby grają w gry 2-osobowe.
     pub my_player_idx: usize,
     pub room_order: Vec<usize>,
-    /// Aktualny ekran/gra każdego miejsca, równolegle do `room_order`.
     pub room_focus: Vec<String>,
     pub room_players_count: usize,
     pub reset_requested_by_me: bool,
@@ -226,18 +225,26 @@ impl Default for NetClient {
 
 impl NetClient {
     fn config_file_path() -> PathBuf {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let dir = PathBuf::from(home).join(".config");
+        #[cfg(target_os = "windows")]
+        let base = std::env::var("APPDATA")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_else(|_| ".".to_string());
+
+        #[cfg(not(target_os = "windows"))]
+        let base = std::env::var("HOME")
+            .unwrap_or_else(|_| ".".to_string())
+            + "/.config";
+
+        let dir = PathBuf::from(base);
         let _ = std::fs::create_dir_all(&dir);
         dir.join("linux_game_hub_auth.json")
     }
 
-  pub fn load_credentials(&mut self) {
+    pub fn load_credentials(&mut self) {
         let path = Self::config_file_path();
         if let Ok(data) = std::fs::read_to_string(path) {
             if let Ok(creds) = serde_json::from_str::<SavedCredentials>(&data) {
                 if !creds.username.is_empty() && (!creds.token.is_empty() || !creds.password.is_empty()) {
-                    // Jeśli w starym konfigu był port 8000, automatycznie migrujemy na 47832
                     self.server_url = creds.server_url.replace(":8000", ":47832");
                     self.username_input = creds.username;
                     self.auth_token = creds.token;
@@ -261,6 +268,7 @@ impl NetClient {
         if let Ok(json) = serde_json::to_string_pretty(&creds) {
             let path = Self::config_file_path();
             let _ = std::fs::write(&path, json);
+            #[cfg(unix)]
             let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
             self.has_saved_account = true;
             self.show_account_form = false;
@@ -268,7 +276,12 @@ impl NetClient {
     }
 
     pub fn check_for_updates(&mut self) {
-        let url = format!("{}/api/version", self.server_url.trim_end_matches('/'));
+        #[cfg(target_os = "windows")]
+        let platform = "windows";
+        #[cfg(not(target_os = "windows"))]
+        let platform = "linux";
+
+        let url = format!("{}/api/version?platform={}", self.server_url.trim_end_matches('/'), platform);
         if let Ok(resp) = ureq::get(&url).call() {
             if let Ok(val) = resp.into_json::<serde_json::Value>() {
                 let srv_ver = val
@@ -293,9 +306,15 @@ impl NetClient {
     }
 
     pub fn perform_self_update(&mut self) {
+        #[cfg(target_os = "windows")]
+        let platform = "windows";
+        #[cfg(not(target_os = "windows"))]
+        let platform = "linux";
+
         let url = format!(
-            "{}/api/download_update",
-            self.server_url.trim_end_matches('/')
+            "{}/api/download_update?platform={}",
+            self.server_url.trim_end_matches('/'),
+            platform
         );
         let Ok(resp) = ureq::get(&url).call() else {
             self.update_status = "❌ Błąd pobierania aktualizacji z serwera!".to_string();
@@ -308,7 +327,6 @@ impl NetClient {
             return;
         }
 
-        // Weryfikacja sumy kontrolnej SHA-256
         if let Some(expected_hash) = &self.update_sha256 {
             let actual_hash = format!("{:x}", Sha256::digest(&bytes));
             if actual_hash != *expected_hash {
@@ -332,31 +350,60 @@ impl NetClient {
         };
 
         let random_id: u64 = rand::random();
-        let new_bin_tmp = target.with_extension(format!("upd_{:x}", random_id));
-        if std::fs::write(&new_bin_tmp, &bytes).is_err() {
-            self.update_status = "❌ Brak uprawnień do zapisu w tym katalogu!".to_string();
-            return;
+
+        #[cfg(unix)]
+        {
+            let new_bin_tmp = target.with_extension(format!("upd_{:x}", random_id));
+            if std::fs::write(&new_bin_tmp, &bytes).is_err() {
+                self.update_status = "❌ Brak uprawnień do zapisu w tym katalogu!".to_string();
+                return;
+            }
+            let _ = std::fs::set_permissions(&new_bin_tmp, std::fs::Permissions::from_mode(0o755));
+
+            let updater_script = format!("/tmp/lgh_upd_{:x}.sh", random_id);
+            let script_content = format!(
+                "#!/usr/bin/env bash\nsleep 0.4\nmv -f \"{}\" \"{}\"\nchmod +x \"{}\"\nexec \"{}\" &\n",
+                new_bin_tmp.display(),
+                target.display(),
+                target.display(),
+                target.display()
+            );
+
+            if std::fs::write(&updater_script, script_content).is_ok() {
+                let _ = std::fs::set_permissions(&updater_script, std::fs::Permissions::from_mode(0o755));
+                let _ = std::process::Command::new("bash")
+                    .arg(&updater_script)
+                    .spawn();
+                std::process::exit(0);
+            } else {
+                self.update_status = "❌ Błąd uruchamiania instalatora aktualizacji.".to_string();
+            }
         }
-        let _ = std::fs::set_permissions(&new_bin_tmp, std::fs::Permissions::from_mode(0o755));
 
-        let updater_script = format!("/tmp/lgh_upd_{:x}.sh", random_id);
-        let script_content = format!(
-            "#!/usr/bin/env bash\nsleep 0.4\nmv -f \"{}\" \"{}\"\nchmod +x \"{}\"\nexec \"{}\" &\n",
-            new_bin_tmp.display(),
-            target.display(),
-            target.display(),
-            target.display()
-        );
+        #[cfg(windows)]
+        {
+            let new_bin_tmp = target.with_extension(format!("upd_{:x}.exe", random_id));
+            if std::fs::write(&new_bin_tmp, &bytes).is_err() {
+                self.update_status = "❌ Brak uprawnień do zapisu aktualizacji!".to_string();
+                return;
+            }
 
-        if std::fs::write(&updater_script, script_content).is_ok() {
-            let _ =
-                std::fs::set_permissions(&updater_script, std::fs::Permissions::from_mode(0o755));
-            let _ = std::process::Command::new("bash")
-                .arg(&updater_script)
-                .spawn();
-            std::process::exit(0);
-        } else {
-            self.update_status = "❌ Błąd uruchamiania instalatora aktualizacji.".to_string();
+            let bat_path = std::env::temp_dir().join(format!("lgh_upd_{:x}.bat", random_id));
+            let bat_content = format!(
+                "@echo off\r\ntimeout /t 1 /nobreak > NUL\r\nmove /y \"{}\" \"{}\"\r\nstart \"\" \"{}\"\r\ndel \"%~f0\"\r\n",
+                new_bin_tmp.display(),
+                target.display(),
+                target.display()
+            );
+
+            if std::fs::write(&bat_path, bat_content).is_ok() {
+                let _ = std::process::Command::new("cmd")
+                    .args(["/C", &bat_path.to_string_lossy()])
+                    .spawn();
+                std::process::exit(0);
+            } else {
+                self.update_status = "❌ Błąd instalatora Windows.".to_string();
+            }
         }
     }
 
@@ -390,8 +437,14 @@ impl NetClient {
             return false;
         };
 
-        if let tungstenite::stream::MaybeTlsStream::Plain(s) = socket.get_mut() {
-            let _ = s.set_nonblocking(true);
+        match socket.get_mut() {
+            tungstenite::stream::MaybeTlsStream::Plain(s) => {
+                let _ = s.set_nonblocking(true);
+            }
+            tungstenite::stream::MaybeTlsStream::Rustls(s) => {
+                let _ = s.sock.set_nonblocking(true);
+            }
+            _ => {}
         }
 
         let (out_tx, out_rx) = mpsc::channel::<String>();
@@ -459,18 +512,14 @@ impl NetClient {
         self.incoming_reset_pair = None;
     }
 
-    /// Czy lokalny gracz jest obserwatorem w grze o podanej liczbie miejsc.
     pub fn is_spectator(&self, max_players: usize) -> bool {
         self.connected_room.is_some() && self.my_player_idx >= max_players
     }
 
-    /// Numer stolika lokalnego gracza. Stoliki to stałe pary slotów:
-    /// 0/1 oraz 2/3 — dzięki temu wyjście innej osoby nie rozrywa pary.
     pub fn my_pair(&self) -> usize {
         self.my_slot / 2
     }
 
-    /// Miejsce lokalnego gracza w obrębie stolika (0 albo 1).
     pub fn my_pair_seat(&self) -> usize {
         self.my_slot % 2
     }
@@ -479,13 +528,11 @@ impl NetClient {
         1 - self.my_pair()
     }
 
-    /// Aktualny focus konkretnego slotu (nie pozycji w kolejce).
     pub fn slot_focus(&self, slot: usize) -> Option<&str> {
         let idx = self.room_order.iter().position(|s| *s == slot)?;
         self.room_focus.get(idx).map(String::as_str)
     }
 
-    /// Czy oba miejsca stolika mają otwartą tę samą grę.
     pub fn pair_active(&self, pair: usize, game: &str) -> bool {
         if self.connected_room.is_none() || pair > 1 {
             return false;
@@ -498,8 +545,6 @@ impl NetClient {
         self.pair_active(self.my_pair(), game)
     }
 
-    /// Stolik, którego grę powinien widzieć lokalny gracz: najpierw własny,
-    /// a jeśli własny nie gra — drugi stolik (wtedy jest się obserwatorem).
     pub fn playing_pair(&self, game: &str) -> Option<usize> {
         if self.my_pair_active(game) {
             Some(self.my_pair())
@@ -514,8 +559,6 @@ impl NetClient {
         matches!(self.playing_pair(game), Some(pair) if pair != self.my_pair())
     }
 
-    /// Ile osób z innych miejsc obserwuje grę. Liczymy tylko osoby, które
-    /// mają otwarty ten ekran, a nie całą resztę pokoju.
     pub fn spectator_count_for_game(&self, game: &str) -> usize {
         let active_pairs = (0..2).filter(|pair| self.pair_active(*pair, game)).count();
         if active_pairs == 0 {
@@ -597,12 +640,10 @@ impl NetClient {
     }
 
     pub fn login_or_register(&mut self, is_register: bool) -> bool {
-        // Przy logowaniu, jeśli mamy zapisany token, spróbuj token_login
         if !is_register && !self.auth_token.is_empty() {
             if self.try_token_login() {
                 return true;
             }
-            // Token wygasł — kontynuuj z loginem hasłem (jeśli użytkownik je wpisał)
         }
 
         if self.password_input.is_empty() {
@@ -629,7 +670,7 @@ impl NetClient {
                     self.auth_token = profile.token.clone();
                     self.current_user = Some(profile);
                     self.auth_error.clear();
-                    self.password_input.clear(); // Wyczyść hasło z pamięci!
+                    self.password_input.clear();
                     self.save_credentials();
                     self.fetch_leaderboard();
                     self.fetch_rooms();

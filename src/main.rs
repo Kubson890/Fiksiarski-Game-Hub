@@ -1,3 +1,4 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod audio;
 mod battleship;
 mod blackjack;
@@ -59,14 +60,9 @@ struct GameHubApp {
     audio: SoundManager,
     net: NetClient,
     last_synced_chips: i32,
-    /// Skład pokoju z poprzedniej klatki — pozwala odróżnić dołączenie
-    /// obserwatora (gra trwa dalej) od zmiany składu graczy (gra się resetuje).
     last_room_order: Vec<usize>,
-    /// Ostatnio wysłany serwerowi ekran/gra — wysyłamy tylko przy zmianie.
     last_sent_focus: Option<String>,
-    /// Gra, w której własny stolik ostatnio grał jako gracze.
     last_my_pair_game: Option<String>,
-    /// Stolik, którego grę aktualnie obserwujemy (gra, numer stolika).
     last_watched_pair: Option<(String, usize)>,
     blackjack: blackjack::BlackjackGame,
     solitaire: solitaire::SolitaireGame,
@@ -76,7 +72,6 @@ struct GameHubApp {
     battleship: battleship::BattleshipGame,
 }
 
-/// Gry, w których pokój 4-osobowy dzieli się na 2 graczy + obserwatorów.
 fn is_two_player_screen(screen: Screen) -> bool {
     matches!(screen, Screen::Chess | Screen::Battleship)
 }
@@ -91,7 +86,6 @@ fn screen_game_key(screen: Screen) -> Option<&'static str> {
 }
 
 impl GameHubApp {
-    /// Reset tylko tej gry, której dotyczyła zatwierdzona prośba.
     fn reset_online_game(&mut self, game: &str) {
         let count = self.net.room_players_count.max(1);
         match game {
@@ -114,11 +108,6 @@ impl GameHubApp {
         }
     }
 
-    /// Reaguje na zmianę składu pokoju.
-    ///
-    /// Stoliki to stałe pary slotów (0/1 i 2/3), więc zmiana w drugim
-    /// stoliku nie przerywa gry pierwszego. Resetujemy tylko grę własnej
-    /// pary, gdy zmieni się jej skład.
     fn handle_room_state_change(&mut self) {
         let new_order = self.net.room_order.clone();
         if new_order == self.last_room_order {
@@ -132,8 +121,6 @@ impl GameHubApp {
         let pair_roster_changed = old_partner != new_partner;
 
         if pair_roster_changed {
-            // Przy kolejnym wejściu obu graczy na ten sam ekran gra
-            // zostanie bezpiecznie rozpoczęta od nowa.
             self.last_my_pair_game = None;
             self.last_watched_pair = None;
             if self.net.my_pair() == 0 {
@@ -153,12 +140,8 @@ impl GameHubApp {
         }
 
         self.last_room_order = new_order;
-        // Świeży stan planszy dociąga `sync_game_modes` — tu nie wysyłamy
-        // drugiej prośby w tej samej klatce.
     }
 
-    /// Ustawia tryb gry (gracz / obserwator / oczekiwanie) dla aktualnego
-    /// ekranu, na podstawie tego, co robią oba stoliki.
     fn sync_game_modes(&mut self) {
         if !self.is_online_session || self.net.connected_room.is_none() {
             return;
@@ -169,10 +152,6 @@ impl GameHubApp {
             _ => None,
         };
 
-        // Jeśli wyszliśmy z ekranu, przy którym nasz stolik grał, od razu
-        // zerujemy tę planszę. Partner wchodzi wtedy w stan oczekiwania i robi
-        // dokładnie to samo, więc po powrocie oboje zaczynamy świeżą partię
-        // zamiast zostać z niespójnym stanem planszy.
         if let Some(prev) = self.last_my_pair_game.clone() {
             if screen_game != Some(prev.as_str()) {
                 self.last_my_pair_game = None;
@@ -193,8 +172,6 @@ impl GameHubApp {
         let count = self.net.spectator_count_for_game(game);
 
         if self.net.my_pair_active(game) {
-            // Własny stolik gra. Po przerwie/obserwowaniu zaczynamy świeżo,
-            // ale zwykłe pozostanie na ekranie nie resetuje partii.
             if self.last_my_pair_game.as_deref() != Some(game) {
                 match game {
                     "chess" => self.chess.setup_online(seat),
@@ -216,7 +193,6 @@ impl GameHubApp {
             }
             self.last_watched_pair = None;
         } else if self.net.is_spectator_for_game(game) {
-            // Drugi stolik gra — możemy tylko obserwować.
             let owner = self
                 .net
                 .playing_pair(game)
@@ -235,8 +211,6 @@ impl GameHubApp {
                 _ => {}
             }
             if new_watch {
-                // Snapshot może nadpisać naszą lokalną planszę, więc po
-                // powrocie do gry własnego stolika zaczniemy ją od nowa.
                 self.last_my_pair_game = None;
                 self.last_watched_pair = Some(watch_key);
                 self.net.send_event(&NetEvent::StateRequest {
@@ -245,10 +219,7 @@ impl GameHubApp {
                 });
             }
         } else {
-            // Brak aktywnego stolika — czekamy na partnera, plansza zablokowana.
             if self.last_my_pair_game.as_deref() == Some(game) {
-                // Przerwana partia nie może zostać wznowiona tylko u jednej
-                // osoby — oboje zaczniemy od świeżej planszy, gdy wrócimy.
                 match game {
                     "chess" => self.chess.setup_online(seat),
                     "battleship" => self.battleship.setup_online(seat),
@@ -271,7 +242,6 @@ impl GameHubApp {
         }
     }
 
-    /// Odpowiada na prośbę obserwatora o aktualny stan gry.
     fn handle_state_request(&mut self, game: &str, pair: usize) {
         if game == "chess" || game == "battleship" {
             if self.net.my_pair() != pair || !self.net.my_pair_active(game) {
@@ -302,8 +272,6 @@ impl GameHubApp {
     }
 
     fn apply_game_state(&mut self, game: &str, pair: usize, state: &serde_json::Value) {
-        // Stan z sieci przyjmują tylko obserwatorzy drugiego stolika.
-        // Aktywni gracze są na bieżąco przez zdarzenia ruchów.
         if game == "chess" || game == "battleship" {
             if self.net.playing_pair(game) != Some(pair) || pair == self.net.my_pair() {
                 return;
@@ -328,12 +296,8 @@ impl GameHubApp {
     fn open_game(&mut self, screen: Screen) {
         self.audio.play(Sfx::Click);
         self.current_screen = screen;
-        // O świeży stan planszy poprosi `sync_game_modes` w kolejnej klatce
-        // (tylko gdy faktycznie jesteśmy obserwatorami innego stolika).
     }
 
-    /// Wychodzimy z trybu pokoju — gry muszą wrócić do trybu lokalnego,
-    /// inaczej dawny obserwator zostałby zablokowany na własnej planszy.
     fn leave_online_games(&mut self) {
         self.chess.online_mode = false;
         self.chess.spectator = false;
@@ -364,7 +328,6 @@ impl GameHubApp {
         screen_game_key(self.current_screen).unwrap_or("hub")
     }
 
-    /// Czy można poprosić o reset aktualnie otwartej gry.
     fn can_request_reset(&self) -> bool {
         if !self.is_online_session || self.net.connected_room.is_none() {
             return false;
@@ -377,8 +340,6 @@ impl GameHubApp {
         }
     }
 
-    /// Czy lokalny gracz może głosować nad oczekującą prośbą o reset.
-    /// Liczy się gra i stolik z prośby, a nie aktualnie otwarty ekran.
     fn can_vote_on_pending_reset(&self) -> bool {
         let Some(game) = self.net.incoming_reset_game.as_deref() else {
             return false;
@@ -406,11 +367,19 @@ fn game_label(key: &str) -> &'static str {
 
 impl eframe::App for GameHubApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Wymuś ciemny motyw, jeśli system Windows wtrącił jasny:
+        if !ctx.style().visuals.dark_mode {
+            let mut style = (*ctx.style()).clone();
+            style.visuals = egui::Visuals::dark();
+            style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
+            style.visuals.widgets.inactive.rounding = egui::Rounding::same(8.0);
+            style.visuals.widgets.hovered.rounding = egui::Rounding::same(10.0);
+            ctx.set_style(style);
+        }
+
         if self.is_online_session && self.net.connected_room.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
             let events = self.net.poll_events();
-            // Najpierw aktualizujemy skład pokoju i role przy stolikach,
-            // dopiero potem stosujemy zdarzenia ruchów z sieci.
             self.handle_room_state_change();
             self.sync_game_modes();
 
@@ -418,10 +387,7 @@ impl eframe::App for GameHubApp {
                 match ev {
                     NetEvent::Assigned { .. }
                     | NetEvent::RoomState { .. }
-                    | NetEvent::FocusGame { .. } => {
-                        // Skład pokoju obsługujemy zbiorczo po odebraniu wszystkich
-                        // zdarzeń — wtedy widzimy już finalną kolejkę miejsc.
-                    }
+                    | NetEvent::FocusGame { .. } => {}
                     NetEvent::ResetRequest { pair, .. } => {
                         if pair == self.net.my_pair() || pair == 2 {
                             self.audio.play(Sfx::Check);
@@ -491,8 +457,6 @@ impl eframe::App for GameHubApp {
                 }
             }
 
-            // Informujemy serwer o aktualnie otwartej grze, ale tylko gdy
-            // faktycznie się zmieniła — bez spamu jednym pakietem na klatkę.
             let focus = self.current_game_key();
             if self.last_sent_focus.as_deref() != Some(focus) {
                 self.net.send_event(&NetEvent::FocusGame {
@@ -554,9 +518,6 @@ impl eframe::App for GameHubApp {
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(6.0);
-            // Skalujemy pasek do szerokości okna. Przy wąskim oknie zmniejszamy
-            // czcionki i odstępy, a `horizontal_wrapped` pozwala zawinąć resztę
-            // do drugiej linii, zamiast ucinać informacje.
             let bar_width = ui.available_width();
             let scale = (bar_width / 1500.0).clamp(0.64, 1.0);
             let narrow = scale < 0.82;
@@ -752,8 +713,6 @@ impl eframe::App for GameHubApp {
                                     )
                                     .clicked()
                                 {
-                                    // Reset wykonamy po potwierdzeniu z serwera,
-                                    // żeby nie rozjechać stanu, gdy głos jest spóźniony.
                                     self.net.send_event(&NetEvent::ResetApproved {
                                         game: game.clone(),
                                         pair,
@@ -837,8 +796,6 @@ impl eframe::App for GameHubApp {
                     }
                 }
 
-                // Przyciski po prawej są częścią tego samego, zawijanego
-                // układu — dzięki temu nigdy nie wychodzą poza okno.
                 let mute_label = if self.audio.muted { "🔇" } else { "🔊" };
                 if ui
                     .button(egui::RichText::new(mute_label).size(fs_btn))
