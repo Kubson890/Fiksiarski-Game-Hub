@@ -62,27 +62,43 @@ pub enum NetEvent {
         players_count: usize,
         #[serde(default)]
         order: Vec<usize>,
+        /// Aktualny ekran/gra każdego miejsca, równolegle do `order`.
+        #[serde(default)]
+        focus: Vec<String>,
     },
     RoomState {
         order: Vec<usize>,
         players_count: usize,
+        /// Aktualny ekran/gra każdego miejsca, równolegle do `order`.
+        #[serde(default)]
+        focus: Vec<String>,
     },
     ResetRequest {
         from_player: usize,
         #[serde(default)]
         game: String,
+        /// Stolik, którego dotyczy prośba (0/1; 2 = Chińczyk).
+        #[serde(default)]
+        pair: usize,
     },
     ResetApproved {
         #[serde(default)]
         game: String,
+        #[serde(default)]
+        pair: usize,
     },
     ResetDeclined {
         #[serde(default)]
         game: String,
+        #[serde(default)]
+        pair: usize,
     },
     ChessMove {
         from: u32,
         to: u32,
+        /// Stolik, do którego należy ruch (0/1).
+        #[serde(default)]
+        pair: usize,
     },
     LudoRoll {
         face: u8,
@@ -95,20 +111,37 @@ pub enum NetEvent {
         ships: Vec<(usize, usize, usize, bool)>,
         #[serde(default)]
         from_seat: usize,
+        /// Stolik, do którego należy flota (0/1).
+        #[serde(default)]
+        pair: usize,
     },
     BattleshipShot {
         x: usize,
         y: usize,
         #[serde(default)]
         from_seat: usize,
+        /// Stolik, do którego należy strzał (0/1).
+        #[serde(default)]
+        pair: usize,
+    },
+    /// Informuje serwer, na jakim ekranie/grze znajduje się dane miejsce.
+    /// Serwer dzięki temu wie, która gra jest faktycznie rozgrywana.
+    FocusGame {
+        game: String,
     },
     StateRequest {
         game: String,
+        /// Stolik, którego stanu dotyczy prośba (0/1; 2 = Chińczyk).
+        #[serde(default)]
+        pair: usize,
     },
     GameState {
         game: String,
         #[serde(default)]
         from_seat: usize,
+        /// Stolik, którego dotyczy snapshot (0/1; 2 = Chińczyk).
+        #[serde(default)]
+        pair: usize,
         state: serde_json::Value,
     },
 }
@@ -135,10 +168,13 @@ pub struct NetClient {
     /// Pozycja w kolejce pokoju (0..3). Pierwsze 2 osoby grają w gry 2-osobowe.
     pub my_player_idx: usize,
     pub room_order: Vec<usize>,
+    /// Aktualny ekran/gra każdego miejsca, równolegle do `room_order`.
+    pub room_focus: Vec<String>,
     pub room_players_count: usize,
     pub reset_requested_by_me: bool,
     pub incoming_reset_from: Option<usize>,
     pub incoming_reset_game: Option<String>,
+    pub incoming_reset_pair: Option<usize>,
     ws_tx: Option<Sender<String>>,
     ws_rx: Option<Receiver<NetEvent>>,
 }
@@ -174,10 +210,12 @@ impl Default for NetClient {
             my_slot: 0,
             my_player_idx: 0,
             room_order: Vec::new(),
+            room_focus: Vec::new(),
             room_players_count: 1,
             reset_requested_by_me: false,
             incoming_reset_from: Option::None,
             incoming_reset_game: None,
+            incoming_reset_pair: None,
             ws_tx: None,
             ws_rx: None,
         };
@@ -394,11 +432,13 @@ impl NetClient {
         self.my_slot = 0;
         self.my_player_idx = 0;
         self.room_order.clear();
+        self.room_focus.clear();
         self.room_players_count = 1;
         self.connected_room = Some(room);
         self.reset_requested_by_me = false;
         self.incoming_reset_from = None;
         self.incoming_reset_game = None;
+        self.incoming_reset_pair = None;
         self.ws_tx = Some(out_tx);
         self.ws_rx = Some(in_rx);
         true
@@ -411,20 +451,82 @@ impl NetClient {
         self.my_slot = 0;
         self.my_player_idx = 0;
         self.room_order.clear();
+        self.room_focus.clear();
         self.room_players_count = 1;
         self.reset_requested_by_me = false;
         self.incoming_reset_from = None;
         self.incoming_reset_game = None;
-    }
-
-    /// Liczba obserwatorów dla gry o podanej liczbie miejsc.
-    pub fn spectator_count(&self, max_players: usize) -> usize {
-        self.room_order.len().saturating_sub(max_players)
+        self.incoming_reset_pair = None;
     }
 
     /// Czy lokalny gracz jest obserwatorem w grze o podanej liczbie miejsc.
     pub fn is_spectator(&self, max_players: usize) -> bool {
         self.connected_room.is_some() && self.my_player_idx >= max_players
+    }
+
+    /// Numer stolika lokalnego gracza. Stoliki to stałe pary slotów:
+    /// 0/1 oraz 2/3 — dzięki temu wyjście innej osoby nie rozrywa pary.
+    pub fn my_pair(&self) -> usize {
+        self.my_slot / 2
+    }
+
+    /// Miejsce lokalnego gracza w obrębie stolika (0 albo 1).
+    pub fn my_pair_seat(&self) -> usize {
+        self.my_slot % 2
+    }
+
+    pub fn other_pair(&self) -> usize {
+        1 - self.my_pair()
+    }
+
+    /// Aktualny focus konkretnego slotu (nie pozycji w kolejce).
+    pub fn slot_focus(&self, slot: usize) -> Option<&str> {
+        let idx = self.room_order.iter().position(|s| *s == slot)?;
+        self.room_focus.get(idx).map(String::as_str)
+    }
+
+    /// Czy oba miejsca stolika mają otwartą tę samą grę.
+    pub fn pair_active(&self, pair: usize, game: &str) -> bool {
+        if self.connected_room.is_none() || pair > 1 {
+            return false;
+        }
+        self.slot_focus(pair * 2) == Some(game)
+            && self.slot_focus(pair * 2 + 1) == Some(game)
+    }
+
+    pub fn my_pair_active(&self, game: &str) -> bool {
+        self.pair_active(self.my_pair(), game)
+    }
+
+    /// Stolik, którego grę powinien widzieć lokalny gracz: najpierw własny,
+    /// a jeśli własny nie gra — drugi stolik (wtedy jest się obserwatorem).
+    pub fn playing_pair(&self, game: &str) -> Option<usize> {
+        if self.my_pair_active(game) {
+            Some(self.my_pair())
+        } else if self.pair_active(self.other_pair(), game) {
+            Some(self.other_pair())
+        } else {
+            None
+        }
+    }
+
+    pub fn is_spectator_for_game(&self, game: &str) -> bool {
+        matches!(self.playing_pair(game), Some(pair) if pair != self.my_pair())
+    }
+
+    /// Ile osób z innych miejsc obserwuje grę. Liczymy tylko osoby, które
+    /// mają otwarty ten ekran, a nie całą resztę pokoju.
+    pub fn spectator_count_for_game(&self, game: &str) -> usize {
+        let active_pairs = (0..2).filter(|pair| self.pair_active(*pair, game)).count();
+        if active_pairs == 0 {
+            return 0;
+        }
+        let focused = self
+            .room_order
+            .iter()
+            .filter(|slot| self.slot_focus(**slot) == Some(game))
+            .count();
+        focused.saturating_sub(active_pairs * 2)
     }
 
     pub fn send_event(&self, ev: &NetEvent) {
@@ -445,17 +547,21 @@ impl NetClient {
                         seat,
                         players_count,
                         order,
+                        focus,
                     } => {
                         self.my_slot = *slot;
                         self.my_player_idx = *seat;
                         self.room_players_count = *players_count;
                         self.room_order = order.clone();
+                        self.room_focus = focus.clone();
                     }
                     NetEvent::RoomState {
                         order,
                         players_count,
+                        focus,
                     } => {
                         self.room_order = order.clone();
+                        self.room_focus = focus.clone();
                         self.room_players_count = *players_count;
                         self.my_player_idx = self
                             .room_order
@@ -463,14 +569,24 @@ impl NetClient {
                             .position(|slot| *slot == self.my_slot)
                             .unwrap_or(0);
                     }
-                    NetEvent::ResetRequest { from_player, game } => {
-                        self.incoming_reset_from = Some(*from_player);
-                        self.incoming_reset_game = Some(game.clone());
+                    NetEvent::ResetRequest {
+                        from_player,
+                        game,
+                        pair,
+                    } => {
+                        if *pair == self.my_pair() || *pair == 2 {
+                            self.incoming_reset_from = Some(*from_player);
+                            self.incoming_reset_game = Some(game.clone());
+                            self.incoming_reset_pair = Some(*pair);
+                        }
                     }
-                    NetEvent::ResetApproved { .. } | NetEvent::ResetDeclined { .. } => {
-                        self.reset_requested_by_me = false;
-                        self.incoming_reset_from = None;
-                        self.incoming_reset_game = None;
+                    NetEvent::ResetApproved { pair, .. } | NetEvent::ResetDeclined { pair, .. } => {
+                        if *pair == self.my_pair() || *pair == 2 {
+                            self.reset_requested_by_me = false;
+                            self.incoming_reset_from = None;
+                            self.incoming_reset_game = None;
+                            self.incoming_reset_pair = None;
+                        }
                     }
                     _ => {}
                 }

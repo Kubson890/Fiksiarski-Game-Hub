@@ -46,21 +46,22 @@ BINARY_PATH = os.path.join(RELEASES_DIR, "LinuxGameHub.AppImage")
 
 DEFAULT_ROOMS = ["POKOJ1", "POKOJ2"]
 rooms: Dict[str, Dict[int, WebSocket]] = {r: {} for r in DEFAULT_ROOMS}
-# Kolejka miejsc w pokoju. Pierwsze 2 miejsca grają w gry 2-osobowe,
-# pozostałe osoby są obserwatorami. W Chińczyku grają wszystkie 4 miejsca.
+# Kolejka miejsc w pokoju. Stoliki to stałe pary slotów (0/1 oraz 2/3),
+# więc wyjście innej osoby nie rozrywa istniejącej pary. W Chińczyku
+# grają wszystkie 4 miejsca.
 room_order: Dict[str, list[int]] = {r: [] for r in DEFAULT_ROOMS}
-# Oczekująca prośba o reset: {"from_seat": int, "game": str} albo None.
-room_reset: Dict[str, dict | None] = {r: None for r in DEFAULT_ROOMS}
-
-# Zdarzenia, które mogą wysyłać wyłącznie gracze zajmujący pierwsze 2 miejsca.
-TWO_PLAYER_EVENTS = {
-    "ChessMove",
-    "BattleshipFleet",
-    "BattleshipShot",
-    "WarStep",
+# Równolegle do room_order: aktualny ekran/gra każdego miejsca
+# (hub/chess/battleship/ludo). Pozwala oznaczyć obserwatorów tylko przy
+# grze, która jest faktycznie rozgrywana.
+room_focus: Dict[str, list[str]] = {r: [] for r in DEFAULT_ROOMS}
+# Oczekujące prośby o reset — osobno dla każdego stolika (0/1) oraz
+# osobny klucz 2 dla Chińczyka, w którym gra cały pokój.
+# Wartość: {"from_seat": int, "from_slot": int, "game": str} albo None.
+room_resets: Dict[str, Dict[int, dict | None]] = {
+    r: {0: None, 1: None, 2: None} for r in DEFAULT_ROOMS
 }
 
-# Gry 2-osobowe — obserwatorzy nie mogą w nich wykonywać ruchów.
+# Gry 2-osobowe — każdy stolik (slot 0/1 i 2/3) gra niezależnie.
 TWO_PLAYER_GAMES = {"chess", "battleship"}
 
 # Gry, dla których klient może wysyłać stan i prosić o reset.
@@ -367,12 +368,43 @@ def download_update():
     )
 
 
+def _focus_list(room_id: str) -> list[str]:
+    """Zwraca listę focusów wyrównaną do długości kolejki miejsc."""
+    order = room_order.get(room_id, [])
+    focus = list(room_focus.get(room_id, []))
+    if len(focus) < len(order):
+        focus.extend(["hub"] * (len(order) - len(focus)))
+    return focus[:len(order)]
+
+
+def _slot_focus(room_id: str, slot: int) -> str | None:
+    """Aktualny ekran/gra konkretnego slotu (nie pozycji w kolejce)."""
+    order = room_order.get(room_id, [])
+    try:
+        idx = order.index(slot)
+    except ValueError:
+        return None
+    focus = _focus_list(room_id)
+    return focus[idx] if idx < len(focus) else "hub"
+
+
+def _pair_active(room_id: str, pair: int, game: str) -> bool:
+    """Czy oba stale miejsca stolika mają otwartą tę samą grę."""
+    if pair not in (0, 1):
+        return False
+    return (
+        _slot_focus(room_id, pair * 2) == game
+        and _slot_focus(room_id, pair * 2 + 1) == game
+    )
+
+
 def _room_state(room_id: str) -> dict:
     order = list(room_order.get(room_id, []))
     return {
         "type": "RoomState",
         "order": order,
         "players_count": len(order),
+        "focus": _focus_list(room_id),
     }
 
 
@@ -390,6 +422,26 @@ async def _broadcast_json(room_id: str, payload: dict, exclude_slot: int | None 
 
 async def _broadcast_room_state(room_id: str, exclude_slot: int | None = None):
     await _broadcast_json(room_id, _room_state(room_id), exclude_slot)
+
+
+async def _prune_room_resets(room_id: str):
+    """Anuluje głosowania, które straciły ważność (wyjście/zmiana gry)."""
+    resets = room_resets.get(room_id, {})
+    for key, pending in list(resets.items()):
+        if pending is None:
+            continue
+        game = pending.get("game", "")
+        valid = pending.get("from_slot") in room_order.get(room_id, [])
+        if valid and game in TWO_PLAYER_GAMES:
+            valid = _pair_active(room_id, key, game)
+        if not valid:
+            resets[key] = None
+            await _broadcast_json(room_id, {
+                "type": "ResetDeclined",
+                "game": game,
+                "pair": key,
+                "from_seat": pending.get("from_seat", 0),
+            })
 
 
 @app.websocket("/ws/{room_id}")
@@ -418,7 +470,9 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
         rooms[room_id].pop(free_slot, None)
         return
 
+    room_focus[room_id] = _focus_list(room_id)
     room_order[room_id].append(free_slot)
+    room_focus[room_id].append("hub")
     seat = room_order[room_id].index(free_slot)
     total_players = len(room_order[room_id])
 
@@ -428,6 +482,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
         "seat": seat,
         "players_count": total_players,
         "order": list(room_order[room_id]),
+        "focus": _focus_list(room_id),
     }))
 
     # Pozostali dostają aktualny skład pokoju. Dzięki temu wiedzą,
@@ -444,7 +499,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 allowed_types = {"ChessMove", "LudoRoll", "LudoMove", "WarStep",
                                "BattleshipFleet", "BattleshipShot",
                                "ResetRequest", "ResetApproved", "ResetDeclined",
-                               "StateRequest", "GameState"}
+                               "StateRequest", "GameState", "FocusGame"}
                 if parsed["type"] not in allowed_types:
                     continue
             except (json.JSONDecodeError, KeyError):
@@ -455,27 +510,69 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
             seat = room_order[room_id].index(free_slot)
             event_type = parsed["type"]
 
-            # W grach 2-osobowych ruchy mogą wysyłać tylko pierwsze 2 osoby.
-            if event_type in TWO_PLAYER_EVENTS and seat >= 2:
+            # Zmiana ekranu/aktualnie otwartej gry. Nie przerywa gry — służy
+            # tylko do tego, by licznik obserwatorów pokazywał się wyłącznie
+            # przy grze, w której faktycznie są gracze.
+            if event_type == "FocusGame":
+                game = str(parsed.get("game", ""))
+                if game not in {"hub", "chess", "battleship", "ludo"}:
+                    continue
+                focus = _focus_list(room_id)
+                if focus[seat] != game:
+                    focus[seat] = game
+                    room_focus[room_id] = focus
+                    await _broadcast_room_state(room_id)
+                    await _prune_room_resets(room_id)
                 continue
 
-            # --- Głosowanie nad resetem: jedna oczekująca prośba na pokój ---
+            # Stolik = para stałych slotów: 0/1 oraz 2/3. Dzięki temu pary
+            # nie rozpadają się, gdy ktoś inny wyjdzie z pokoju.
+            requested_pair_raw = parsed.get("pair")
+            pair = free_slot // 2
+            parsed["pair"] = pair
+            parsed["from_seat"] = free_slot % 2
+
+            # Ruchy w grach 2-osobowych może wysyłać tylko gracz ze stolika,
+            # którego obaj członkowie mają otwartą tę samą grę.
+            event_game = {
+                "ChessMove": "chess",
+                "BattleshipFleet": "battleship",
+                "BattleshipShot": "battleship",
+            }.get(event_type)
+            if event_game is not None and not _pair_active(room_id, pair, event_game):
+                continue
+
+            # Wojna pozostaje grą pierwszego stolika (brak osobnej synchronizacji).
+            if event_type == "WarStep" and pair != 0:
+                continue
+
+            if event_type in {"LudoRoll", "LudoMove"}:
+                # Chińczyk rozgrywany jest przez cały pokój.
+                parsed["pair"] = 2
+
+            # --- Głosowanie nad resetem: osobna prośba dla każdego stolika ---
             broadcast_to_all = False
             if event_type in {"ResetRequest", "ResetApproved", "ResetDeclined"}:
-                pending = room_reset.get(room_id)
+                game = str(parsed.get("game", ""))
+                if game not in KNOWN_GAMES:
+                    continue
+
+                if game in TWO_PLAYER_GAMES:
+                    reset_key = pair
+                    if not _pair_active(room_id, reset_key, game):
+                        continue
+                else:
+                    # Chińczyk: wspólne głosowanie całego pokoju.
+                    reset_key = 2
+
+                pending = room_resets[room_id].get(reset_key)
 
                 if event_type == "ResetRequest":
-                    game = str(parsed.get("game", ""))
-                    if game not in KNOWN_GAMES:
-                        continue
-                    max_players = 2 if game in TWO_PLAYER_GAMES else 4
-                    if seat >= max_players:
-                        continue
                     # Pierwsza prośba wygrywa; kolejną można wysłać po odrzuceniu.
                     if pending is not None:
                         continue
-                    room_reset[room_id] = {
-                        "from_seat": seat,
+                    room_resets[room_id][reset_key] = {
+                        "from_seat": free_slot % 2,
                         "from_slot": free_slot,
                         "game": game,
                     }
@@ -484,9 +581,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     if pending is None:
                         continue
                     game = pending["game"]
-                    max_players = 2 if game in TWO_PLAYER_GAMES else 4
-                    if seat >= max_players:
-                        continue
                     # Nie można głosować na własną prośbę (porównujemy slot,
                     # bo pozycje w kolejce mogą się zmienić).
                     if free_slot == pending.get("from_slot"):
@@ -495,30 +589,45 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     claimed = str(parsed.get("game", ""))
                     if claimed and claimed != game:
                         continue
-                    room_reset[room_id] = None
+                    room_resets[room_id][reset_key] = None
                     # Wynik głosowania dostają wszyscy, także głosujący —
                     # dopiero ten pakiet uruchamia reset u klientów.
                     broadcast_to_all = True
 
                 # Ujednolicamy pole gry, żeby klient wiedział, czego dotyczy głos.
                 parsed["game"] = game
+                parsed["pair"] = reset_key
+                if event_type == "ResetRequest":
+                    # Nie ufamy numerowi gracza przysłanemu przez klienta.
+                    parsed["from_player"] = free_slot % 2
 
-            # Obserwator nie może rozsyłać stanu gry.
+            # Obserwator nie może rozsyłać stanu gry; snapshoty dotyczą
+            # konkretnego stolika, więc odpowiedzieć mogą tylko jego gracze.
             if event_type in {"StateRequest", "GameState"}:
                 game = str(parsed.get("game", ""))
                 if game not in KNOWN_GAMES:
                     continue
-                if event_type == "GameState":
-                    max_players = 2 if game in TWO_PLAYER_GAMES else 4
-                    if seat >= max_players:
+                if game in TWO_PLAYER_GAMES:
+                    if event_type == "StateRequest":
+                        try:
+                            requested_pair = int(
+                                requested_pair_raw if requested_pair_raw is not None else -1
+                            )
+                        except (TypeError, ValueError):
+                            continue
+                        if not _pair_active(room_id, requested_pair, game):
+                            continue
+                        parsed["pair"] = requested_pair
+                    else:
+                        if not _pair_active(room_id, pair, game):
+                            continue
+                        parsed["pair"] = pair
+                else:
+                    # Chińczyk: stan wysyła gracz, nie obserwator.
+                    if event_type == "GameState" and seat >= 4:
                         continue
+                    parsed["pair"] = 2
 
-            # Do każdego zdarzenia dokładamy faktyczne miejsce nadawcy.
-            # Klient używa tego m.in. do rozróżnienia flot w Statkach.
-            parsed["from_seat"] = seat
-            if event_type == "ResetRequest":
-                # Nie ufamy numerowi gracza przysłanemu przez klienta.
-                parsed["from_player"] = seat
             data = json.dumps(parsed)
 
             for slot_id, client in list(rooms[room_id].items()):
@@ -532,26 +641,18 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
         pass
     finally:
         # Sprzątamy miejsce niezależnie od sposobu rozłączenia.
-        old_active = tuple(room_order.get(room_id, [])[:2])
         if room_id in rooms and free_slot in rooms[room_id]:
             del rooms[room_id][free_slot]
         if room_id in room_order and free_slot in room_order[room_id]:
+            room_focus[room_id] = _focus_list(room_id)
+            focus_idx = room_order[room_id].index(free_slot)
             room_order[room_id].remove(free_slot)
-        new_active = tuple(room_order.get(room_id, [])[:2])
-
-        # Prośba o reset nie może przetrwać wyjścia autora ani zmiany graczy.
-        pending = room_reset.get(room_id)
-        if pending is not None:
-            requester_left = pending.get("from_slot") == free_slot
-            if requester_left or old_active != new_active:
-                room_reset[room_id] = None
-                await _broadcast_json(room_id, {
-                    "type": "ResetDeclined",
-                    "game": pending.get("game", ""),
-                    "from_seat": pending.get("from_seat", 0),
-                })
+            if focus_idx < len(room_focus[room_id]):
+                room_focus[room_id].pop(focus_idx)
 
         await _broadcast_room_state(room_id)
+        # Prośba o reset nie może przetrwać wyjścia autora ani rozpadu stolika.
+        await _prune_room_resets(room_id)
 
 
 # --- STRONA GŁÓWNA ---

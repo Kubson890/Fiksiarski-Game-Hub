@@ -73,6 +73,8 @@ pub struct BattleshipGame {
     pub my_seat: usize,
     /// Gracz z miejsca 3/4 tylko obserwuje bitwę.
     pub spectator: bool,
+    /// Czeka na drugiego gracza ze swojego stolika — plansza jest zablokowana.
+    pub waiting: bool,
     /// Ilu obserwatorów aktualnie patrzy na bitwę (do ikony 👁).
     pub spectators: usize,
     /// W trybie obserwatora: czyja kolej (0 = lewy gracz, 1 = prawy gracz).
@@ -101,6 +103,7 @@ impl Default for BattleshipGame {
             outgoing_shot: None,
             my_seat: 0,
             spectator: false,
+            waiting: false,
             spectators: 0,
             spectator_turn: 0,
             state_ready: true,
@@ -138,20 +141,56 @@ impl BattleshipGame {
     pub fn leave_online(&mut self) {
         self.online_mode = false;
         self.spectator = false;
+        self.waiting = false;
         self.state_ready = true;
     }
 
     pub fn setup_online(&mut self, player_idx: usize) {
         self.online_mode = true;
-        self.my_seat = player_idx.min(3);
-        self.spectator = self.my_seat >= 2;
+        // `player_idx` to miejsce w obrębie stolika (0/1).
+        self.my_seat = player_idx.min(1);
+        self.spectator = false;
+        self.waiting = false;
         self.my_turn_online = self.my_seat == 0;
         self.spectator_turn = 0;
-        self.state_ready = !self.spectator;
+        self.state_ready = true;
         self.new_game();
-        if self.spectator {
-            self.status_text =
-                "👁 Obserwujesz bitwę — czekam na synchronizację plansz...".to_string();
+    }
+
+    /// Ustawia rolę przy stole: gracz / obserwator / oczekujący na partnera.
+    pub fn set_online_role(&mut self, spectator: bool, waiting: bool) {
+        let changed = spectator != self.spectator || waiting != self.waiting;
+        self.spectator = spectator;
+        self.waiting = waiting;
+        if spectator || waiting {
+            self.outgoing_fleet = None;
+            self.outgoing_shot = None;
+        }
+        if changed {
+            if waiting {
+                self.status_text =
+                    "⏳ Czekam na drugiego gracza ze stolika...".to_string();
+            } else if spectator {
+                self.status_text =
+                    "👁 Obserwujesz bitwę — czekam na synchronizację plansz...".to_string();
+            } else {
+                self.status_text = match self.phase {
+                    Phase::Placement => "🚢 Rozmieszczanie flot...".to_string(),
+                    Phase::Battle => {
+                        if self.my_turn_online {
+                            "🎯 TWOJA KOLEJ na strzał!".to_string()
+                        } else {
+                            "⏳ Czekaj na ruch przeciwnika...".to_string()
+                        }
+                    }
+                    Phase::GameOver { player_won: true } => {
+                        "🏆 ZWYCIĘSTWO!".to_string()
+                    }
+                    Phase::GameOver { player_won: false } => {
+                        "💀 PORAŻKA!".to_string()
+                    }
+                };
+            }
         }
     }
 
@@ -526,6 +565,7 @@ impl BattleshipGame {
 
     fn fire_at_bot(&mut self, x: usize, y: usize, audio: &SoundManager) {
         if self.spectator
+            || self.waiting
             || self.phase != Phase::Battle
             // Nie strzelamy, zanim nie dotrze flota przeciwnika — inaczej
             // pierwsze strzały byłyby fałszywymi pudłami.
@@ -701,7 +741,8 @@ impl BattleshipGame {
                     self.place_horizontal = !self.place_horizontal;
                 }
 
-                let can_random = !self.online_mode || self.bot_ships.is_empty();
+                let can_random = (!self.online_mode || self.bot_ships.is_empty())
+                    && !self.waiting;
                 let rand_btn = ui.add_enabled(
                     can_random,
                     egui::Button::new(egui::RichText::new("🎲 Losuj układ floty i graj!").size(16.0)),
@@ -855,7 +896,7 @@ impl BattleshipGame {
                     if board_resp.secondary_clicked() {
                         audio.play(Sfx::Click);
                         self.place_horizontal = !self.place_horizontal;
-                    } else if board_resp.clicked() && valid {
+                    } else if board_resp.clicked() && valid && !self.waiting {
                         audio.play(Sfx::CardPlace);
                         self.player_ships.push(candidate);
                         self.placing_idx += 1;

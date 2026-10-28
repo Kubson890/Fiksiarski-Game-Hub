@@ -35,6 +35,8 @@ pub struct ChessGame {
     pub outgoing_move: Option<(u32, u32)>,
     /// Gracz z miejsca 3/4 tylko obserwuje partię.
     pub spectator: bool,
+    /// Czeka na drugiego gracza ze swojego stolika — plansza jest zablokowana.
+    pub waiting: bool,
     /// Ilu obserwatorów aktualnie patrzy na partię (do ikony 👁).
     pub spectators: usize,
 }
@@ -58,6 +60,7 @@ impl Default for ChessGame {
             my_online_color: Color::White,
             outgoing_move: None,
             spectator: false,
+            waiting: false,
             spectators: 0,
         };
         game.update_status();
@@ -82,17 +85,37 @@ impl ChessGame {
     pub fn setup_online(&mut self, player_idx: usize) {
         self.online_mode = true;
         self.vs_bot = false;
-        self.spectator = player_idx >= 2;
-        // Miejsca 3/4 nie kontrolują koloru — tylko obserwują.
-        self.my_online_color = if !self.spectator && player_idx == 1 {
+        // `player_idx` to teraz miejsce w obrębie stolika (0/1), a nie pokoju.
+        self.spectator = false;
+        self.waiting = false;
+        self.my_online_color = if player_idx == 1 {
             Color::Black
         } else {
             Color::White
         };
         self.flipped = self.my_online_color == Color::Black;
         self.new_game();
-        if self.spectator {
-            self.status_text = "👁 Obserwujesz partię — czekam na synchronizację...".to_string();
+    }
+
+    /// Ustawia rolę przy stole: gracz / obserwator / oczekujący na partnera.
+    pub fn set_online_role(&mut self, spectator: bool, waiting: bool) {
+        let changed = spectator != self.spectator || waiting != self.waiting;
+        self.spectator = spectator;
+        self.waiting = waiting;
+        if spectator || waiting {
+            self.outgoing_move = None;
+            self.selected_sq = None;
+            self.dragging_sq = None;
+        }
+        if changed {
+            if waiting {
+                self.status_text = "⏳ Czekam na drugiego gracza ze stolika...".to_string();
+            } else if spectator {
+                self.status_text =
+                    "👁 Obserwujesz partię — czekam na synchronizację...".to_string();
+            } else {
+                self.update_status();
+            }
         }
     }
 
@@ -246,7 +269,9 @@ impl ChessGame {
             // Tylko wysyłamy ruch do serwera, gdy to nasz ruch (nie ruch przeciwnika z sieci).
             // Obserwator nigdy nie wysyła ruchów.
             if !self.online_mode
-                || (!self.spectator && moving_color == self.my_online_color)
+                || (!self.spectator
+                    && !self.waiting
+                    && moving_color == self.my_online_color)
             {
                 self.outgoing_move = Some((from as u32, to as u32));
             }
@@ -263,6 +288,7 @@ impl ChessGame {
                 };
                 if human_won
                     && !self.spectator
+                    && !self.waiting
                     && (!self.online_mode || moving_color == self.my_online_color)
                 {
                     self.newly_won = true;
@@ -562,7 +588,12 @@ impl ChessGame {
                     }
                 }
             } else {
-                let (online_label, online_color) = if self.spectator {
+                let (online_label, online_color) = if self.waiting {
+                    (
+                        "⏳ Czekam na drugiego gracza ze stolika...",
+                        egui::Color32::GOLD,
+                    )
+                } else if self.spectator {
                     ("👁 Tryb obserwatora — nie możesz wykonywać ruchów", egui::Color32::GOLD)
                 } else {
                     match self.my_online_color {
@@ -769,7 +800,7 @@ impl ChessGame {
                     egui::Sense::click_and_drag(),
                 );
 
-                let can_control = if self.spectator {
+                let can_control = if self.spectator || self.waiting {
                     false
                 } else if self.online_mode {
                     self.pos.turn() == self.my_online_color && self.active_anim.is_none()
@@ -854,7 +885,7 @@ impl ChessGame {
                     if board_rect.contains(ptr) {
                         let col = ((ptr.x - board_rect.left()) / sq_size).floor() as usize;
                         let row = ((ptr.y - board_rect.top()) / sq_size).floor() as usize;
-                        if col < 8 && row < 8 && !self.spectator {
+                        if col < 8 && row < 8 && !self.spectator && !self.waiting {
                             let target_sq = self.visual_to_square(col, row);
                             if target_sq != drag_sq {
                                 self.try_make_move(drag_sq, target_sq, false, audio);
