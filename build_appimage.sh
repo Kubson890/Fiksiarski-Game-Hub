@@ -8,7 +8,7 @@ echo "📁 [2/4] Przygotowywanie struktury AppDir..."
 rm -rf AppDir
 mkdir -p AppDir/usr/bin
 
-cp target/release/linux_game_hub AppDir/usr/bin/
+cp target/release/Fiksiarski_game_hub AppDir/usr/bin/linux_game_hub
 
 cat << 'APPRUN' > AppDir/AppRun
 #!/usr/bin/env bash

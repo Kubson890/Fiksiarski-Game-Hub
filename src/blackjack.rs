@@ -45,7 +45,9 @@ impl BlackjackGame {
         if self.current_bet > self.chips && self.chips > 0 {
             self.current_bet = self.chips.min(50);
         }
-    }    fn calculate_score(hand: &[Card]) -> u32 {
+    }
+
+    fn calculate_score(hand: &[Card]) -> u32 {
         let mut total: u32 = 0;
         let mut aces: u32 = 0;
 

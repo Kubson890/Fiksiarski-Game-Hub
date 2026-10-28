@@ -1,6 +1,7 @@
 use crate::audio::{Sfx, SoundManager};
 use eframe::egui;
 use rand::Rng;
+use serde_json::{json, Value};
 use std::time::Instant;
 
 const FLEET_SIZES: [(usize, &str); 5] = [
@@ -68,6 +69,16 @@ pub struct BattleshipGame {
     pub my_turn_online: bool,
     pub outgoing_fleet: Option<Vec<(usize, usize, usize, bool)>>,
     pub outgoing_shot: Option<(usize, usize)>,
+    /// Miejsce w kolejce pokoju (0/1 gra, 2/3 obserwuje).
+    pub my_seat: usize,
+    /// Gracz z miejsca 3/4 tylko obserwuje bitwę.
+    pub spectator: bool,
+    /// Ilu obserwatorów aktualnie patrzy na bitwę (do ikony 👁).
+    pub spectators: usize,
+    /// W trybie obserwatora: czyja kolej (0 = lewy gracz, 1 = prawy gracz).
+    spectator_turn: usize,
+    /// Czy obserwator dostał już pełny stan plansz.
+    state_ready: bool,
 }
 
 impl Default for BattleshipGame {
@@ -88,6 +99,11 @@ impl Default for BattleshipGame {
             my_turn_online: true,
             outgoing_fleet: None,
             outgoing_shot: None,
+            my_seat: 0,
+            spectator: false,
+            spectators: 0,
+            spectator_turn: 0,
+            state_ready: true,
         };
         g.new_game();
         g
@@ -118,14 +134,33 @@ impl BattleshipGame {
         self.outgoing_shot = None;
     }
 
-    pub fn setup_online(&mut self, player_idx: usize) {
-        self.online_mode = true;
-        self.my_turn_online = player_idx == 0;
-        self.new_game();
+    /// Powrót do gry lokalnej — czyści tryb obserwatora.
+    pub fn leave_online(&mut self) {
+        self.online_mode = false;
+        self.spectator = false;
+        self.state_ready = true;
     }
 
-    pub fn receive_enemy_fleet(&mut self, ships_data: Vec<(usize, usize, usize, bool)>) {
-        self.bot_ships = ships_data
+    pub fn setup_online(&mut self, player_idx: usize) {
+        self.online_mode = true;
+        self.my_seat = player_idx.min(3);
+        self.spectator = self.my_seat >= 2;
+        self.my_turn_online = self.my_seat == 0;
+        self.spectator_turn = 0;
+        self.state_ready = !self.spectator;
+        self.new_game();
+        if self.spectator {
+            self.status_text =
+                "👁 Obserwujesz bitwę — czekam na synchronizację plansz...".to_string();
+        }
+    }
+
+    pub fn receive_enemy_fleet(
+        &mut self,
+        ships_data: Vec<(usize, usize, usize, bool)>,
+        from_seat: usize,
+    ) {
+        let ships: Vec<Ship> = ships_data
             .into_iter()
             .map(|(x, y, len, horizontal)| Ship {
                 x,
@@ -134,10 +169,46 @@ impl BattleshipGame {
                 horizontal,
             })
             .collect();
+
+        if self.spectator {
+            match from_seat {
+                0 => self.player_ships = ships,
+                1 => self.bot_ships = ships,
+                _ => {}
+            }
+            // Gdy obie floty są już znane, rozmieszczanie się skończyło.
+            if self.phase == Phase::Placement
+                && !self.player_ships.is_empty()
+                && !self.bot_ships.is_empty()
+            {
+                self.phase = Phase::Battle;
+                self.state_ready = true;
+                self.status_text = "🎯 Obie floty gotowe — bitwa się rozpoczęła!".to_string();
+            }
+        } else {
+            self.bot_ships = ships;
+            if self.online_mode && self.phase == Phase::Battle {
+                self.status_text = if self.my_turn_online {
+                    "🎯 Flota przeciwnika gotowa — TWOJA KOLEJ na strzał!".to_string()
+                } else {
+                    "🎯 Flota przeciwnika gotowa — czekaj na swój ruch.".to_string()
+                };
+            }
+        }
     }
 
-    pub fn receive_enemy_shot(&mut self, x: usize, y: usize, audio: &SoundManager) {
+    pub fn receive_enemy_shot(
+        &mut self,
+        x: usize,
+        y: usize,
+        from_seat: usize,
+        audio: &SoundManager,
+    ) {
         if x >= 10 || y >= 10 {
+            return;
+        }
+        if self.spectator {
+            self.apply_spectator_shot(from_seat, x, y, audio);
             return;
         }
         self.bot_shots[x][y] = true;
@@ -174,6 +245,223 @@ impl BattleshipGame {
             self.my_turn_online = true;
             self.status_text = "💧 Przeciwnik spudłował! TWOJA KOLEJ na strzał!".to_string();
         }
+    }
+
+    fn apply_spectator_shot(
+        &mut self,
+        from_seat: usize,
+        x: usize,
+        y: usize,
+        audio: &SoundManager,
+    ) {
+        if from_seat > 1 || matches!(self.phase, Phase::GameOver { .. }) {
+            return;
+        }
+        // Obserwator mógł wejść w trakcie rozmieszczania flot — pierwszy
+        // strzał oznacza, że bitwa już się zaczęła.
+        if self.phase == Phase::Placement {
+            self.phase = Phase::Battle;
+            self.state_ready = true;
+        }
+        let (target_ships, target_shots) = if from_seat == 0 {
+            (&self.bot_ships, &mut self.player_shots)
+        } else {
+            (&self.player_ships, &mut self.bot_shots)
+        };
+        if target_shots[x][y] {
+            return;
+        }
+        target_shots[x][y] = true;
+        let is_hit = Self::has_ship_at(target_ships, x, y);
+
+        if is_hit {
+            audio.play(Sfx::ChessCap);
+            let mut sunk_now = false;
+            for ship in target_ships {
+                if ship.cells().contains(&(x, y)) && ship.is_sunk(target_shots) {
+                    Self::mark_halo_around_sunk(ship, target_shots);
+                    sunk_now = true;
+                }
+            }
+            if target_ships.iter().all(|s| s.is_sunk(target_shots)) {
+                audio.play(Sfx::Win);
+                self.phase = Phase::GameOver {
+                    player_won: from_seat == 0,
+                };
+                self.status_text = format!(
+                    "🏆 KONIEC! Gracz {} zatopił całą flotę przeciwnika!",
+                    from_seat + 1
+                );
+            } else if sunk_now {
+                audio.play(Sfx::Check);
+                self.status_text = format!("🔥 Gracz {} zatopił okręt!", from_seat + 1);
+            } else {
+                self.status_text = format!("💥 Gracz {} trafił i strzela dalej!", from_seat + 1);
+            }
+            self.spectator_turn = from_seat;
+        } else {
+            audio.play(Sfx::CardPlace);
+            self.status_text = format!("💧 Gracz {} spudłował.", from_seat + 1);
+            self.spectator_turn = 1 - from_seat;
+        }
+    }
+
+    /// Pełny stan obu plansz — wysyłany obserwatorowi lub graczowi,
+    /// który dopiero wchodzi na ekran Statków.
+    pub fn state_json(&self, from_seat: usize) -> Value {
+        let swapped = from_seat == 1;
+        let (seat0_ships, seat1_ships, shots_by_0, shots_by_1) = if swapped {
+            (&self.bot_ships, &self.player_ships, &self.bot_shots, &self.player_shots)
+        } else {
+            (&self.player_ships, &self.bot_ships, &self.player_shots, &self.bot_shots)
+        };
+        let turn = if swapped {
+            if self.my_turn_online {
+                1
+            } else {
+                0
+            }
+        } else if self.my_turn_online {
+            0
+        } else {
+            1
+        };
+        let phase = match self.phase {
+            Phase::Placement => "placement",
+            Phase::Battle => "battle",
+            Phase::GameOver { .. } => "over",
+        };
+        let winner = match self.phase {
+            Phase::GameOver { player_won } => Some(if swapped {
+                if player_won {
+                    1
+                } else {
+                    0
+                }
+            } else if player_won {
+                0
+            } else {
+                1
+            }),
+            _ => None,
+        };
+        // Status neutralny wobec perspektywy gracza — stan wysyłany jest
+        // zarówno drugiemu graczowi, jak i obserwatorom.
+        let status = match (phase, winner) {
+            ("over", Some(winner)) => format!("🏆 KONIEC! Wygrywa Gracz {}!", winner + 1),
+            ("battle", _) => format!("🎯 Tura: Gracz {}", turn + 1),
+            ("placement", _) => "🚢 Rozmieszczanie flot...".to_string(),
+            _ => self.status_text.clone(),
+        };
+        let ships = |fleet: &[Ship]| {
+            fleet
+                .iter()
+                .map(|s| json!([s.x, s.y, s.len, s.horizontal]))
+                .collect::<Vec<_>>()
+        };
+        json!({
+            "phase": phase,
+            "winner": winner,
+            "seat0_ships": ships(seat0_ships),
+            "seat1_ships": ships(seat1_ships),
+            "shots_by_0": shots_by_0,
+            "shots_by_1": shots_by_1,
+            "turn": turn,
+            "status": status,
+        })
+    }
+
+    pub fn apply_state_json(&mut self, state: &Value) -> bool {
+        let parse_ships = |key: &str| -> Vec<Ship> {
+            state
+                .get(key)
+                .and_then(Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|row| {
+                            let arr = row.as_array()?;
+                            Some(Ship {
+                                x: arr.first()?.as_u64()? as usize,
+                                y: arr.get(1)?.as_u64()? as usize,
+                                len: arr.get(2)?.as_u64()? as usize,
+                                horizontal: arr.get(3)?.as_bool()?,
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let parse_shots = |key: &str| -> [[bool; 10]; 10] {
+            let mut shots = [[false; 10]; 10];
+            if let Some(rows) = state.get(key).and_then(Value::as_array) {
+                for (x, row) in rows.iter().take(10).enumerate() {
+                    if let Some(cols) = row.as_array() {
+                        for (y, cell) in cols.iter().take(10).enumerate() {
+                            shots[x][y] = cell.as_bool().unwrap_or(false);
+                        }
+                    }
+                }
+            }
+            shots
+        };
+
+        let seat0_ships = parse_ships("seat0_ships");
+        let seat1_ships = parse_ships("seat1_ships");
+        let shots_by_0 = parse_shots("shots_by_0");
+        let shots_by_1 = parse_shots("shots_by_1");
+        let turn = state.get("turn").and_then(Value::as_u64).unwrap_or(0) as usize;
+
+        if self.spectator {
+            self.player_ships = seat0_ships;
+            self.bot_ships = seat1_ships;
+            self.player_shots = shots_by_0;
+            self.bot_shots = shots_by_1;
+            self.spectator_turn = turn;
+        } else if self.my_seat == 1 {
+            self.player_ships = seat1_ships;
+            self.bot_ships = seat0_ships;
+            self.player_shots = shots_by_1;
+            self.bot_shots = shots_by_0;
+            self.my_turn_online = turn == 1;
+        } else {
+            self.player_ships = seat0_ships;
+            self.bot_ships = seat1_ships;
+            self.player_shots = shots_by_0;
+            self.bot_shots = shots_by_1;
+            self.my_turn_online = turn == 0;
+        }
+
+        let was_battle = self.phase == Phase::Battle;
+        self.phase = match state.get("phase").and_then(Value::as_str).unwrap_or("battle") {
+            "placement" if self.spectator && was_battle => Phase::Battle,
+            "placement" => Phase::Placement,
+            "over" => {
+                let winner = state.get("winner").and_then(Value::as_u64).map(|w| w as usize);
+                let local_won = match winner {
+                    Some(winner) if self.spectator => winner == 0,
+                    Some(winner) => winner == self.my_seat,
+                    None => false,
+                };
+                Phase::GameOver {
+                    player_won: local_won,
+                }
+            }
+            _ => Phase::Battle,
+        };
+        self.status_text = state
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        self.blast = None;
+        self.bot_targets.clear();
+        self.outgoing_fleet = None;
+        self.outgoing_shot = None;
+        self.state_ready = true;
+        if self.spectator {
+            self.status_text = format!("👁 Obserwujesz | {}", self.status_text);
+        }
+        true
     }
 
     fn can_place_ship(existing: &[Ship], candidate: Ship) -> bool {
@@ -237,7 +525,11 @@ impl BattleshipGame {
     }
 
     fn fire_at_bot(&mut self, x: usize, y: usize, audio: &SoundManager) {
-        if self.phase != Phase::Battle
+        if self.spectator
+            || self.phase != Phase::Battle
+            // Nie strzelamy, zanim nie dotrze flota przeciwnika — inaczej
+            // pierwsze strzały byłyby fałszywymi pudłami.
+            || (self.online_mode && self.bot_ships.is_empty())
             || self.player_shots[x][y]
             || (self.online_mode && !self.my_turn_online)
         {
@@ -362,6 +654,11 @@ impl BattleshipGame {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, audio: &SoundManager) {
+        if self.spectator {
+            self.spectator_ui(ui);
+            return;
+        }
+
         let now = Instant::now();
 
         if self.phase == Phase::Placement && ui.input(|i| i.key_pressed(egui::Key::R)) {
@@ -420,12 +717,13 @@ impl BattleshipGame {
                                 .map(|s| (s.x, s.y, s.len, s.horizontal))
                                 .collect(),
                         );
-                        self.status_text = if self.my_turn_online {
-                            "🎯 Flota gotowa! Czekasz na przeciwnika lub strzelasz!"
+                        self.status_text = if self.bot_ships.is_empty() {
+                            "⏳ Flota gotowa! Czekam na rozmieszczenie przeciwnika...".to_string()
+                        } else if self.my_turn_online {
+                            "🎯 Flota gotowa! TWOJA KOLEJ na strzał!".to_string()
                         } else {
-                            "🎯 Flota gotowa! Czekasz na ruch przeciwnika..."
-                        }
-                        .to_string();
+                            "🎯 Flota gotowa! Czekaj na ruch przeciwnika...".to_string()
+                        };
                     } else {
                         self.status_text =
                             "🎯 Flota gotowa! Kliknij na Radar Wroga (po prawej), aby oddać salwę!"
@@ -441,6 +739,20 @@ impl BattleshipGame {
                     .strong()
                     .color(egui::Color32::from_rgb(135, 225, 255)),
             );
+            if self.spectators > 0 {
+                ui.separator();
+                let text = if self.spectators == 1 {
+                    "👁 1 osoba obserwuje grę".to_string()
+                } else {
+                    format!("👁 {} osoby obserwują grę", self.spectators)
+                };
+                ui.label(
+                    egui::RichText::new(text)
+                        .size(15.0)
+                        .strong()
+                        .color(egui::Color32::GOLD),
+                );
+            }
         });
 
         ui.add_space(12.0);
@@ -556,10 +868,19 @@ impl BattleshipGame {
                                         .map(|s| (s.x, s.y, s.len, s.horizontal))
                                         .collect(),
                                 );
+                                self.status_text = if self.bot_ships.is_empty() {
+                                    "⏳ Flota gotowa! Czekam na rozmieszczenie przeciwnika..."
+                                        .to_string()
+                                } else if self.my_turn_online {
+                                    "🎯 Flota gotowa! TWOJA KOLEJ na strzał!".to_string()
+                                } else {
+                                    "🎯 Flota gotowa! Czekaj na ruch przeciwnika...".to_string()
+                                };
+                            } else {
+                                self.status_text =
+                                    "🎯 Wszystkie okręty na pozycjach! Strzelaj w Radar Wroga po prawej!"
+                                        .to_string();
                             }
-                            self.status_text =
-                                "🎯 Wszystkie okręty na pozycjach! Strzelaj w Radar Wroga po prawej!"
-                                    .to_string();
                         } else {
                             self.status_text = format!(
                                 "Ustaw swój okręt: {} (PPM lub klawisz R obraca)",
@@ -662,6 +983,166 @@ impl BattleshipGame {
                 self.blast = None;
             }
         }
+    }
+
+    /// Widok dla miejsc 3/4 — obie plansze, bez możliwości strzelania.
+    fn spectator_ui(&mut self, ui: &mut egui::Ui) {
+        let full_rect = ui.available_rect_before_wrap();
+        ui.painter()
+            .rect_filled(full_rect, 12.0, egui::Color32::from_rgb(16, 28, 42));
+
+        let margin = (full_rect.width() * 0.02).clamp(10.0, 26.0);
+        let content_rect = full_rect.shrink(margin);
+
+        let mut child_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(content_rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        let ui = &mut child_ui;
+
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("👁 Tryb obserwatora — nie możesz strzelać")
+                    .size(19.0)
+                    .strong()
+                    .color(egui::Color32::GOLD),
+            );
+            if self.spectators > 0 {
+                ui.separator();
+                let text = if self.spectators == 1 {
+                    "👁 1 osoba obserwuje grę".to_string()
+                } else {
+                    format!("👁 {} osoby obserwują grę", self.spectators)
+                };
+                ui.label(
+                    egui::RichText::new(text)
+                        .size(15.0)
+                        .color(egui::Color32::GOLD),
+                );
+            }
+            ui.separator();
+            ui.label(
+                egui::RichText::new(&self.status_text)
+                    .size(16.0)
+                    .strong()
+                    .color(egui::Color32::from_rgb(135, 225, 255)),
+            );
+        });
+
+        if !self.state_ready {
+            ui.add_space(24.0);
+            ui.label(
+                egui::RichText::new("⏳ Czekam na przesłanie stanu plansz od graczy...")
+                    .size(18.0)
+                    .color(egui::Color32::GOLD),
+            );
+        }
+
+        ui.add_space(8.0);
+        if self.phase == Phase::Battle {
+            ui.label(
+                egui::RichText::new(format!(
+                    "🎯 Tura: Gracz {}",
+                    self.spectator_turn + 1
+                ))
+                .size(17.0)
+                .strong()
+                .color(egui::Color32::from_rgb(255, 195, 110)),
+            );
+        }
+
+        let work_rect = ui.available_rect_before_wrap();
+        let gap = (work_rect.width() * 0.04).clamp(20.0, 56.0);
+        let max_board_w = ((work_rect.width() - gap) / 2.0).max(220.0);
+        let max_board_h = (work_rect.height() - 70.0).max(220.0);
+        let board_px = max_board_w.min(max_board_h);
+        let cell = board_px / 10.0;
+
+        let total_w = board_px * 2.0 + gap;
+        let start_x = work_rect.left() + ((work_rect.width() - total_w) / 2.0).max(0.0);
+        let start_y =
+            work_rect.top() + 8.0 + ((work_rect.height() - board_px) / 2.0).max(0.0);
+
+        let left_board = egui::Rect::from_min_size(
+            egui::pos2(start_x, start_y),
+            egui::vec2(board_px, board_px),
+        );
+        let right_board = egui::Rect::from_min_size(
+            egui::pos2(start_x + board_px + gap, start_y),
+            egui::vec2(board_px, board_px),
+        );
+
+        let p_alive = self
+            .player_ships
+            .iter()
+            .filter(|s| !s.is_sunk(&self.bot_shots))
+            .count();
+        let b_alive = self
+            .bot_ships
+            .iter()
+            .filter(|s| !s.is_sunk(&self.player_shots))
+            .count();
+
+        ui.painter().text(
+            egui::pos2(left_board.center().x, left_board.top() - 18.0),
+            egui::Align2::CENTER_CENTER,
+            format!("🟦 GRACZ 1 (Okręty: {}/5)", p_alive),
+            egui::FontId::proportional(19.0),
+            egui::Color32::WHITE,
+        );
+        ui.painter().text(
+            egui::pos2(right_board.center().x, right_board.top() - 18.0),
+            egui::Align2::CENTER_CENTER,
+            format!("🟥 GRACZ 2 (Okręty: {}/5)", b_alive),
+            egui::FontId::proportional(19.0),
+            egui::Color32::WHITE,
+        );
+
+        Self::draw_ocean_grid(ui.painter(), left_board, cell, false);
+        Self::draw_ocean_grid(ui.painter(), right_board, cell, true);
+
+        for ship in &self.player_ships {
+            Self::draw_ship_hull(
+                ui.painter(),
+                left_board,
+                cell,
+                ship,
+                ship.is_sunk(&self.bot_shots),
+            );
+        }
+        for ship in &self.bot_ships {
+            Self::draw_ship_hull(
+                ui.painter(),
+                right_board,
+                cell,
+                ship,
+                ship.is_sunk(&self.player_shots),
+            );
+        }
+
+        Self::draw_shots_markers(
+            ui.painter(),
+            left_board,
+            cell,
+            &self.bot_shots,
+            &self.player_ships,
+        );
+        Self::draw_shots_markers(
+            ui.painter(),
+            right_board,
+            cell,
+            &self.player_shots,
+            &self.bot_ships,
+        );
+
+        ui.painter().text(
+            egui::pos2(full_rect.center().x, full_rect.bottom() - 12.0),
+            egui::Align2::CENTER_CENTER,
+            "👁 Obserwator widzi obie floty — gracze widzą tylko własną planszę i radar.",
+            egui::FontId::proportional(13.0),
+            egui::Color32::from_rgb(150, 170, 190),
+        );
     }
 
     fn draw_ocean_grid(

@@ -162,8 +162,10 @@ impl WarGame {
             }
         }
 
-        let mut p_card = self.player_deck.pop_front().unwrap();
-        let mut b_card = self.bot_deck.pop_front().unwrap();
+        let (Some(mut p_card), Some(mut b_card)) = (self.player_deck.pop_front(), self.bot_deck.pop_front()) else {
+            self.finish_by_count(audio);
+            return;
+        };
         p_card.face_up = true;
         b_card.face_up = true;
 
@@ -221,16 +223,16 @@ impl WarGame {
 
     fn finish_by_count(&mut self, audio: &SoundManager) {
         self.auto_play = false;
-        if self.player_deck.len() > self.bot_deck.len() {
-            self.winner = Some("🏆 ZWYCIĘSTWO! Zdobyłeś wszystkie karty przeciwnika!");
-            self.status_text = self.winner.unwrap().to_string();
+        let msg = if self.player_deck.len() > self.bot_deck.len() {
             self.newly_won = true;
             audio.play(Sfx::Win);
+            "🏆 ZWYCIĘSTWO! Zdobyłeś wszystkie karty przeciwnika!"
         } else {
-            self.winner = Some("💀 PORAŻKA! Straciłeś wszystkie swoje karty.");
-            self.status_text = self.winner.unwrap().to_string();
             audio.play(Sfx::Lose);
-        }
+            "💀 PORAŻKA! Straciłeś wszystkie swoje karty."
+        };
+        self.winner = Some(msg);
+        self.status_text = msg.to_string();
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, audio: &SoundManager) {

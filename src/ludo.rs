@@ -1,6 +1,7 @@
 use crate::audio::{Sfx, SoundManager};
 use eframe::egui;
 use rand::Rng;
+use serde_json::{json, Value};
 use std::time::Instant;
 
 const MAIN_TRACK: [(usize, usize); 52] = [
@@ -120,6 +121,83 @@ impl LudoGame {
             };
         }
         self.new_game();
+    }
+
+    pub fn state_json(&self) -> Value {
+        let phase = match self.phase {
+            TurnPhase::WaitForRoll | TurnPhase::RollingDice { .. } => "wait_roll",
+            TurnPhase::WaitForMove | TurnPhase::AnimatingPawn => "wait_move",
+            TurnPhase::GameOver(_) => "over",
+        };
+        let player_types: Vec<&str> = self
+            .player_types
+            .iter()
+            .map(|kind| match kind {
+                PlayerType::Human => "human",
+                PlayerType::Bot => "bot",
+                PlayerType::Disabled => "disabled",
+            })
+            .collect();
+        json!({
+            "pawns": self.pawns,
+            "player_types": player_types,
+            "current_turn": self.current_turn,
+            "dice_value": self.dice_value,
+            "phase": phase,
+            "status": &self.status_text,
+        })
+    }
+
+    pub fn apply_state_json(&mut self, state: &Value) -> bool {
+        let Some(pawns) = state.get("pawns").and_then(Value::as_array) else {
+            return false;
+        };
+        let mut new_pawns = [[0u8; 4]; 4];
+        for (player, row) in pawns.iter().take(4).enumerate() {
+            let Some(values) = row.as_array() else {
+                return false;
+            };
+            for (pawn, value) in values.iter().take(4).enumerate() {
+                new_pawns[player][pawn] = value.as_u64().unwrap_or(0) as u8;
+            }
+        }
+        if let Some(types) = state.get("player_types").and_then(Value::as_array) {
+            for (idx, kind) in types.iter().take(4).enumerate() {
+                self.player_types[idx] = match kind.as_str().unwrap_or("human") {
+                    "bot" => PlayerType::Bot,
+                    "disabled" => PlayerType::Disabled,
+                    _ => PlayerType::Human,
+                };
+            }
+        }
+        self.pawns = new_pawns;
+        self.current_turn = state
+            .get("current_turn")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .min(3) as usize;
+        self.dice_value = state
+            .get("dice_value")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .clamp(1, 6) as u8;
+        self.status_text = state
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        self.phase = match state.get("phase").and_then(Value::as_str).unwrap_or("wait_roll") {
+            "wait_move" => TurnPhase::WaitForMove,
+            "over" => TurnPhase::GameOver(self.current_turn),
+            _ => TurnPhase::WaitForRoll,
+        };
+        self.step_anim = None;
+        self.bot_wait_until = None;
+        self.outgoing_roll = None;
+        self.outgoing_pawn = None;
+        self.newly_won = false;
+        self.online_mode = true;
+        true
     }
 
     pub fn apply_remote_roll(&mut self, face: u8, audio: &SoundManager) {

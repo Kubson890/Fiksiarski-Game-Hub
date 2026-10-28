@@ -5,7 +5,9 @@ import hashlib
 import secrets
 import json
 import html
+import time
 from contextlib import contextmanager
+from collections import defaultdict
 
 # Zgodność wersji python-multipart na różnych dystrybucjach (np. Arch/CachyOS vs Debian/Docker)
 try:
@@ -19,7 +21,7 @@ try:
     HAS_BCRYPT = True
 except ImportError:
     HAS_BCRYPT = False
-from fastapi import FastAPI, HTTPException, Form, UploadFile, File, WebSocket, WebSocketDisconnect, Depends, status
+from fastapi import FastAPI, HTTPException, Form, UploadFile, File, WebSocket, WebSocketDisconnect, Depends, status, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, FileResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
@@ -44,6 +46,43 @@ BINARY_PATH = os.path.join(RELEASES_DIR, "LinuxGameHub.AppImage")
 
 DEFAULT_ROOMS = ["POKOJ1", "POKOJ2"]
 rooms: Dict[str, Dict[int, WebSocket]] = {r: {} for r in DEFAULT_ROOMS}
+# Kolejka miejsc w pokoju. Pierwsze 2 miejsca grają w gry 2-osobowe,
+# pozostałe osoby są obserwatorami. W Chińczyku grają wszystkie 4 miejsca.
+room_order: Dict[str, list[int]] = {r: [] for r in DEFAULT_ROOMS}
+# Oczekująca prośba o reset: {"from_seat": int, "game": str} albo None.
+room_reset: Dict[str, dict | None] = {r: None for r in DEFAULT_ROOMS}
+
+# Zdarzenia, które mogą wysyłać wyłącznie gracze zajmujący pierwsze 2 miejsca.
+TWO_PLAYER_EVENTS = {
+    "ChessMove",
+    "BattleshipFleet",
+    "BattleshipShot",
+    "WarStep",
+}
+
+# Gry 2-osobowe — obserwatorzy nie mogą w nich wykonywać ruchów.
+TWO_PLAYER_GAMES = {"chess", "battleship"}
+
+# Gry, dla których klient może wysyłać stan i prosić o reset.
+KNOWN_GAMES = {"chess", "battleship", "ludo"}
+
+# --- Prosta ochrona przed brute-force: max 10 prób logowania / IP / minutę ---
+_login_attempts: dict = defaultdict(list)
+_LOGIN_LIMIT = 10
+_LOGIN_WINDOW = 60  # sekund
+
+
+def _check_rate_limit(ip: str):
+    now = time.time()
+    attempts = _login_attempts[ip]
+    # Wyczyść stare próby poza oknem czasowym
+    _login_attempts[ip] = [t for t in attempts if now - t < _LOGIN_WINDOW]
+    if len(_login_attempts[ip]) >= _LOGIN_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Zbyt wiele prób logowania. Spróbuj ponownie za chwilę."
+        )
+    _login_attempts[ip].append(now)
 
 
 def verify_admin(credentials: HTTPBasicCredentials = Depends(security)):
@@ -170,7 +209,9 @@ def favicon():
 
 
 @app.post("/api/register")
-def register(req: AuthRequest):
+def register(req: AuthRequest, request: Request):
+    ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(ip)
     username = req.username.strip()
     if len(username) < 3 or len(req.password) < 3:
         raise HTTPException(status_code=400, detail="Login i hasło muszą mieć min. 3 znaki.")
@@ -192,7 +233,9 @@ def register(req: AuthRequest):
 
 
 @app.post("/api/login")
-def login(req: AuthRequest):
+def login(req: AuthRequest, request: Request):
+    ip = request.client.host if request.client else "unknown"
+    _check_rate_limit(ip)
     username = req.username.strip()
     if len(username) > 32 or len(req.password) > 128:
         raise HTTPException(status_code=400, detail="Login max 32 znaki, hasło max 128 znaków.")
@@ -324,10 +367,37 @@ def download_update():
     )
 
 
+def _room_state(room_id: str) -> dict:
+    order = list(room_order.get(room_id, []))
+    return {
+        "type": "RoomState",
+        "order": order,
+        "players_count": len(order),
+    }
+
+
+async def _broadcast_json(room_id: str, payload: dict, exclude_slot: int | None = None):
+    data = json.dumps(payload)
+    for slot_id, client in list(rooms.get(room_id, {}).items()):
+        if exclude_slot is not None and slot_id == exclude_slot:
+            continue
+        try:
+            await client.send_text(data)
+        except Exception:
+            # Zerwane połączenie zostanie sprzątnięte przez jego własny handler.
+            pass
+
+
+async def _broadcast_room_state(room_id: str, exclude_slot: int | None = None):
+    await _broadcast_json(room_id, _room_state(room_id), exclude_slot)
+
+
 @app.websocket("/ws/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: str):
-    if room_id not in rooms:
-        rooms[room_id] = {}
+    # Akceptujemy tylko zdefiniowane pokoje — odrzucamy próby tworzenia arbitralnych pokoi
+    if room_id not in DEFAULT_ROOMS:
+        await websocket.close(code=1008)
+        return
 
     free_slot = None
     for slot in range(4):
@@ -339,22 +409,30 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
         await websocket.close(code=1008)
         return
 
-    await websocket.accept()
+    # Rezerwujemy miejsce przed await, żeby dwa równoczesne połączenia
+    # nie wybrały tego samego slotu.
     rooms[room_id][free_slot] = websocket
-    total_players = len(rooms[room_id])
+    try:
+        await websocket.accept()
+    except Exception:
+        rooms[room_id].pop(free_slot, None)
+        return
+
+    room_order[room_id].append(free_slot)
+    seat = room_order[room_id].index(free_slot)
+    total_players = len(room_order[room_id])
 
     await websocket.send_text(json.dumps({
         "type": "Assigned",
-        "player_idx": free_slot,
-        "players_count": total_players
+        "slot": free_slot,
+        "seat": seat,
+        "players_count": total_players,
+        "order": list(room_order[room_id]),
     }))
 
-    for slot_id, client in list(rooms[room_id].items()):
-        if slot_id != free_slot:
-            await client.send_text(json.dumps({
-                "type": "PeerJoined",
-                "players_count": total_players
-            }))
+    # Pozostali dostają aktualny skład pokoju. Dzięki temu wiedzą,
+    # czy ktoś tylko dołączył jako obserwator, czy zmienił się skład graczy.
+    await _broadcast_room_state(room_id, exclude_slot=free_slot)
 
     try:
         while True:
@@ -365,23 +443,115 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     continue
                 allowed_types = {"ChessMove", "LudoRoll", "LudoMove", "WarStep",
                                "BattleshipFleet", "BattleshipShot",
-                               "ResetRequest", "ResetApproved", "ResetDeclined"}
+                               "ResetRequest", "ResetApproved", "ResetDeclined",
+                               "StateRequest", "GameState"}
                 if parsed["type"] not in allowed_types:
                     continue
             except (json.JSONDecodeError, KeyError):
                 continue
+
+            if free_slot not in room_order.get(room_id, []):
+                continue
+            seat = room_order[room_id].index(free_slot)
+            event_type = parsed["type"]
+
+            # W grach 2-osobowych ruchy mogą wysyłać tylko pierwsze 2 osoby.
+            if event_type in TWO_PLAYER_EVENTS and seat >= 2:
+                continue
+
+            # --- Głosowanie nad resetem: jedna oczekująca prośba na pokój ---
+            broadcast_to_all = False
+            if event_type in {"ResetRequest", "ResetApproved", "ResetDeclined"}:
+                pending = room_reset.get(room_id)
+
+                if event_type == "ResetRequest":
+                    game = str(parsed.get("game", ""))
+                    if game not in KNOWN_GAMES:
+                        continue
+                    max_players = 2 if game in TWO_PLAYER_GAMES else 4
+                    if seat >= max_players:
+                        continue
+                    # Pierwsza prośba wygrywa; kolejną można wysłać po odrzuceniu.
+                    if pending is not None:
+                        continue
+                    room_reset[room_id] = {
+                        "from_seat": seat,
+                        "from_slot": free_slot,
+                        "game": game,
+                    }
+                else:
+                    # Zgoda/odrzucenie musi dotyczyć istniejącej prośby.
+                    if pending is None:
+                        continue
+                    game = pending["game"]
+                    max_players = 2 if game in TWO_PLAYER_GAMES else 4
+                    if seat >= max_players:
+                        continue
+                    # Nie można głosować na własną prośbę (porównujemy slot,
+                    # bo pozycje w kolejce mogą się zmienić).
+                    if free_slot == pending.get("from_slot"):
+                        continue
+                    # Nie można podmienić gry w trakcie głosowania.
+                    claimed = str(parsed.get("game", ""))
+                    if claimed and claimed != game:
+                        continue
+                    room_reset[room_id] = None
+                    # Wynik głosowania dostają wszyscy, także głosujący —
+                    # dopiero ten pakiet uruchamia reset u klientów.
+                    broadcast_to_all = True
+
+                # Ujednolicamy pole gry, żeby klient wiedział, czego dotyczy głos.
+                parsed["game"] = game
+
+            # Obserwator nie może rozsyłać stanu gry.
+            if event_type in {"StateRequest", "GameState"}:
+                game = str(parsed.get("game", ""))
+                if game not in KNOWN_GAMES:
+                    continue
+                if event_type == "GameState":
+                    max_players = 2 if game in TWO_PLAYER_GAMES else 4
+                    if seat >= max_players:
+                        continue
+
+            # Do każdego zdarzenia dokładamy faktyczne miejsce nadawcy.
+            # Klient używa tego m.in. do rozróżnienia flot w Statkach.
+            parsed["from_seat"] = seat
+            if event_type == "ResetRequest":
+                # Nie ufamy numerowi gracza przysłanemu przez klienta.
+                parsed["from_player"] = seat
+            data = json.dumps(parsed)
+
             for slot_id, client in list(rooms[room_id].items()):
-                if slot_id != free_slot:
+                if slot_id == free_slot and not broadcast_to_all:
+                    continue
+                try:
                     await client.send_text(data)
+                except Exception:
+                    pass
     except WebSocketDisconnect:
+        pass
+    finally:
+        # Sprzątamy miejsce niezależnie od sposobu rozłączenia.
+        old_active = tuple(room_order.get(room_id, [])[:2])
         if room_id in rooms and free_slot in rooms[room_id]:
             del rooms[room_id][free_slot]
-            rem_count = len(rooms[room_id])
-            for client in list(rooms[room_id].values()):
-                await client.send_text(json.dumps({
-                    "type": "PeerJoined",
-                    "players_count": rem_count
-                }))
+        if room_id in room_order and free_slot in room_order[room_id]:
+            room_order[room_id].remove(free_slot)
+        new_active = tuple(room_order.get(room_id, [])[:2])
+
+        # Prośba o reset nie może przetrwać wyjścia autora ani zmiany graczy.
+        pending = room_reset.get(room_id)
+        if pending is not None:
+            requester_left = pending.get("from_slot") == free_slot
+            if requester_left or old_active != new_active:
+                room_reset[room_id] = None
+                await _broadcast_json(room_id, {
+                    "type": "ResetDeclined",
+                    "game": pending.get("game", ""),
+                    "from_seat": pending.get("from_seat", 0),
+                })
+
+        await _broadcast_room_state(room_id)
 
 
 # --- STRONA GŁÓWNA ---

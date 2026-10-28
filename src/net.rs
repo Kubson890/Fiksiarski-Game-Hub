@@ -56,17 +56,61 @@ pub struct LeaderboardRow {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum NetEvent {
-    Assigned { player_idx: usize, players_count: usize },
-    PeerJoined { players_count: usize },
-    ResetRequest { from_player: usize },
-    ResetApproved,
-    ResetDeclined,
-    ChessMove { from: u32, to: u32 },
-    LudoRoll { face: u8 },
-    LudoMove { pawn_idx: usize },
+    Assigned {
+        slot: usize,
+        seat: usize,
+        players_count: usize,
+        #[serde(default)]
+        order: Vec<usize>,
+    },
+    RoomState {
+        order: Vec<usize>,
+        players_count: usize,
+    },
+    ResetRequest {
+        from_player: usize,
+        #[serde(default)]
+        game: String,
+    },
+    ResetApproved {
+        #[serde(default)]
+        game: String,
+    },
+    ResetDeclined {
+        #[serde(default)]
+        game: String,
+    },
+    ChessMove {
+        from: u32,
+        to: u32,
+    },
+    LudoRoll {
+        face: u8,
+    },
+    LudoMove {
+        pawn_idx: usize,
+    },
     WarStep,
-    BattleshipFleet { ships: Vec<(usize, usize, usize, bool)> },
-    BattleshipShot { x: usize, y: usize },
+    BattleshipFleet {
+        ships: Vec<(usize, usize, usize, bool)>,
+        #[serde(default)]
+        from_seat: usize,
+    },
+    BattleshipShot {
+        x: usize,
+        y: usize,
+        #[serde(default)]
+        from_seat: usize,
+    },
+    StateRequest {
+        game: String,
+    },
+    GameState {
+        game: String,
+        #[serde(default)]
+        from_seat: usize,
+        state: serde_json::Value,
+    },
 }
 
 pub struct NetClient {
@@ -86,10 +130,15 @@ pub struct NetClient {
     // --- MULTIPLAYER POKOJE ---
     pub available_rooms: Vec<RoomStatus>,
     pub connected_room: Option<String>,
+    /// Stabilne miejsce połączenia (0..3) — nie zmienia się po wyjściu innych graczy.
+    pub my_slot: usize,
+    /// Pozycja w kolejce pokoju (0..3). Pierwsze 2 osoby grają w gry 2-osobowe.
     pub my_player_idx: usize,
+    pub room_order: Vec<usize>,
     pub room_players_count: usize,
     pub reset_requested_by_me: bool,
     pub incoming_reset_from: Option<usize>,
+    pub incoming_reset_game: Option<String>,
     ws_tx: Option<Sender<String>>,
     ws_rx: Option<Receiver<NetEvent>>,
 }
@@ -122,10 +171,13 @@ impl Default for NetClient {
                 },
             ],
             connected_room: None,
+            my_slot: 0,
             my_player_idx: 0,
+            room_order: Vec::new(),
             room_players_count: 1,
             reset_requested_by_me: false,
             incoming_reset_from: Option::None,
+            incoming_reset_game: None,
             ws_tx: None,
             ws_rx: None,
         };
@@ -339,9 +391,14 @@ impl NetClient {
             std::thread::sleep(std::time::Duration::from_millis(12));
         });
 
+        self.my_slot = 0;
+        self.my_player_idx = 0;
+        self.room_order.clear();
+        self.room_players_count = 1;
         self.connected_room = Some(room);
         self.reset_requested_by_me = false;
         self.incoming_reset_from = None;
+        self.incoming_reset_game = None;
         self.ws_tx = Some(out_tx);
         self.ws_rx = Some(in_rx);
         true
@@ -351,10 +408,23 @@ impl NetClient {
         self.connected_room = None;
         self.ws_tx = None;
         self.ws_rx = None;
+        self.my_slot = 0;
         self.my_player_idx = 0;
+        self.room_order.clear();
         self.room_players_count = 1;
         self.reset_requested_by_me = false;
         self.incoming_reset_from = None;
+        self.incoming_reset_game = None;
+    }
+
+    /// Liczba obserwatorów dla gry o podanej liczbie miejsc.
+    pub fn spectator_count(&self, max_players: usize) -> usize {
+        self.room_order.len().saturating_sub(max_players)
+    }
+
+    /// Czy lokalny gracz jest obserwatorem w grze o podanej liczbie miejsc.
+    pub fn is_spectator(&self, max_players: usize) -> bool {
+        self.connected_room.is_some() && self.my_player_idx >= max_players
     }
 
     pub fn send_event(&self, ev: &NetEvent) {
@@ -371,21 +441,36 @@ impl NetClient {
             while let Ok(ev) = rx.try_recv() {
                 match &ev {
                     NetEvent::Assigned {
-                        player_idx,
+                        slot,
+                        seat,
+                        players_count,
+                        order,
+                    } => {
+                        self.my_slot = *slot;
+                        self.my_player_idx = *seat;
+                        self.room_players_count = *players_count;
+                        self.room_order = order.clone();
+                    }
+                    NetEvent::RoomState {
+                        order,
                         players_count,
                     } => {
-                        self.my_player_idx = *player_idx;
+                        self.room_order = order.clone();
                         self.room_players_count = *players_count;
+                        self.my_player_idx = self
+                            .room_order
+                            .iter()
+                            .position(|slot| *slot == self.my_slot)
+                            .unwrap_or(0);
                     }
-                    NetEvent::PeerJoined { players_count } => {
-                        self.room_players_count = *players_count;
-                    }
-                    NetEvent::ResetRequest { from_player } => {
+                    NetEvent::ResetRequest { from_player, game } => {
                         self.incoming_reset_from = Some(*from_player);
+                        self.incoming_reset_game = Some(game.clone());
                     }
-                    NetEvent::ResetApproved | NetEvent::ResetDeclined => {
+                    NetEvent::ResetApproved { .. } | NetEvent::ResetDeclined { .. } => {
                         self.reset_requested_by_me = false;
                         self.incoming_reset_from = None;
+                        self.incoming_reset_game = None;
                     }
                     _ => {}
                 }

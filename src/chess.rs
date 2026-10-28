@@ -1,7 +1,11 @@
 use crate::audio::{Sfx, SoundManager};
 use eframe::egui;
 use rand::seq::SliceRandom;
-use shakmaty::{Chess, Color, Move, Outcome, Position, Role, Square};
+use serde_json::{json, Value};
+use shakmaty::fen::Fen;
+use shakmaty::{
+    CastlingMode, Chess, Color, EnPassantMode, Move, Outcome, Position, Role, Square,
+};
 use std::time::Instant;
 
 struct MoveAnimation {
@@ -29,6 +33,10 @@ pub struct ChessGame {
     pub online_mode: bool,
     pub my_online_color: Color,
     pub outgoing_move: Option<(u32, u32)>,
+    /// Gracz z miejsca 3/4 tylko obserwuje partię.
+    pub spectator: bool,
+    /// Ilu obserwatorów aktualnie patrzy na partię (do ikony 👁).
+    pub spectators: usize,
 }
 
 impl Default for ChessGame {
@@ -49,6 +57,8 @@ impl Default for ChessGame {
             online_mode: false,
             my_online_color: Color::White,
             outgoing_move: None,
+            spectator: false,
+            spectators: 0,
         };
         game.update_status();
         game
@@ -72,13 +82,83 @@ impl ChessGame {
     pub fn setup_online(&mut self, player_idx: usize) {
         self.online_mode = true;
         self.vs_bot = false;
-        self.my_online_color = if player_idx == 0 {
-            Color::White
-        } else {
+        self.spectator = player_idx >= 2;
+        // Miejsca 3/4 nie kontrolują koloru — tylko obserwują.
+        self.my_online_color = if !self.spectator && player_idx == 1 {
             Color::Black
+        } else {
+            Color::White
         };
         self.flipped = self.my_online_color == Color::Black;
         self.new_game();
+        if self.spectator {
+            self.status_text = "👁 Obserwujesz partię — czekam na synchronizację...".to_string();
+        }
+    }
+
+    /// Stan partii wystarczający do odtworzenia planszy u obserwatora
+    /// lub u gracza, który dopiero wszedł na ekran szachów.
+    pub fn state_json(&self) -> Value {
+        let fen = Fen::from_position(self.pos.clone(), EnPassantMode::Legal).to_string();
+        json!({
+            "fen": fen,
+            "last_move": self.last_move.map(|(from, to)| [from as u32, to as u32]),
+            "history": &self.move_history,
+        })
+    }
+
+    pub fn apply_state_json(&mut self, state: &Value) -> bool {
+        let Some(fen) = state.get("fen").and_then(Value::as_str) else {
+            return false;
+        };
+        let Ok(fen) = Fen::from_ascii(fen.as_bytes()) else {
+            return false;
+        };
+        let Ok(pos) = fen.into_position::<Chess>(CastlingMode::Standard) else {
+            return false;
+        };
+
+        let new_history: Vec<String> = state
+            .get("history")
+            .and_then(Value::as_array)
+            .map(|history| {
+                history
+                    .iter()
+                    .filter_map(|entry| entry.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Nie cofamy lokalnej partii starszym snapshotem (np. gdy odpowiedzi
+        // od obu graczy dotrą w różnej kolejności).
+        if new_history.len() < self.move_history.len() {
+            return false;
+        }
+
+        self.pos = pos;
+        self.last_move = state
+            .get("last_move")
+            .and_then(Value::as_array)
+            .and_then(|arr| {
+                let from = arr.first()?.as_u64()? as u32;
+                let to = arr.get(1)?.as_u64()? as u32;
+                if from < 64 && to < 64 {
+                    Some((Square::new(from), Square::new(to)))
+                } else {
+                    None
+                }
+            });
+        self.move_history = new_history;
+        self.selected_sq = None;
+        self.dragging_sq = None;
+        self.active_anim = None;
+        self.bot_think_until = None;
+        self.online_mode = true;
+        self.vs_bot = false;
+        self.update_status();
+        if self.spectator {
+            self.status_text = format!("👁 Obserwujesz | {}", self.status_text);
+        }
+        true
     }
 
     pub fn apply_remote_move(&mut self, from_u32: u32, to_u32: u32, audio: &SoundManager) {
@@ -163,7 +243,13 @@ impl ChessGame {
         if let Ok(new_pos) = self.pos.clone().play(&m) {
             self.pos = new_pos;
             self.last_move = Some((from, to));
-            self.outgoing_move = Some((from as u32, to as u32));
+            // Tylko wysyłamy ruch do serwera, gdy to nasz ruch (nie ruch przeciwnika z sieci).
+            // Obserwator nigdy nie wysyła ruchów.
+            if !self.online_mode
+                || (!self.spectator && moving_color == self.my_online_color)
+            {
+                self.outgoing_move = Some((from as u32, to as u32));
+            }
             self.move_history.push(notation);
             self.selected_sq = None;
             self.dragging_sq = None;
@@ -175,7 +261,10 @@ impl ChessGame {
                     }
                     Outcome::Draw => false,
                 };
-                if human_won && (!self.online_mode || moving_color == self.my_online_color) {
+                if human_won
+                    && !self.spectator
+                    && (!self.online_mode || moving_color == self.my_online_color)
+                {
                     self.newly_won = true;
                     audio.play(Sfx::Win);
                 } else {
@@ -473,16 +562,40 @@ impl ChessGame {
                     }
                 }
             } else {
-                let online_label = match self.my_online_color {
-                    Color::White => "🌐 Tryb Online: Grasz Białymi",
-                    Color::Black => "🌐 Tryb Online: Grasz Czarnymi",
+                let (online_label, online_color) = if self.spectator {
+                    ("👁 Tryb obserwatora — nie możesz wykonywać ruchów", egui::Color32::GOLD)
+                } else {
+                    match self.my_online_color {
+                        Color::White => (
+                            "🌐 Tryb Online: Grasz Białymi",
+                            egui::Color32::from_rgb(80, 235, 120),
+                        ),
+                        Color::Black => (
+                            "🌐 Tryb Online: Grasz Czarnymi",
+                            egui::Color32::from_rgb(80, 235, 120),
+                        ),
+                    }
                 };
                 ui.label(
                     egui::RichText::new(online_label)
                         .size(16.0)
                         .strong()
-                        .color(egui::Color32::from_rgb(80, 235, 120)),
+                        .color(online_color),
                 );
+                if self.spectators > 0 {
+                    ui.separator();
+                    let text = if self.spectators == 1 {
+                        "👁 1 osoba obserwuje grę".to_string()
+                    } else {
+                        format!("👁 {} osoby obserwują grę", self.spectators)
+                    };
+                    ui.label(
+                        egui::RichText::new(text)
+                            .size(15.0)
+                            .strong()
+                            .color(egui::Color32::GOLD),
+                    );
+                }
             }
 
             if ui
@@ -656,7 +769,9 @@ impl ChessGame {
                     egui::Sense::click_and_drag(),
                 );
 
-                let can_control = if self.online_mode {
+                let can_control = if self.spectator {
+                    false
+                } else if self.online_mode {
                     self.pos.turn() == self.my_online_color && self.active_anim.is_none()
                 } else {
                     (!self.vs_bot || self.pos.turn() != self.bot_color)
@@ -739,7 +854,7 @@ impl ChessGame {
                     if board_rect.contains(ptr) {
                         let col = ((ptr.x - board_rect.left()) / sq_size).floor() as usize;
                         let row = ((ptr.y - board_rect.top()) / sq_size).floor() as usize;
-                        if col < 8 && row < 8 {
+                        if col < 8 && row < 8 && !self.spectator {
                             let target_sq = self.visual_to_square(col, row);
                             if target_sq != drag_sq {
                                 self.try_make_move(drag_sq, target_sq, false, audio);
