@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use tungstenite::{connect, Message};
 use sha2::{Sha256, Digest};
 
-pub const APP_VERSION: &str = "0.1.0";
+pub const APP_VERSION: &str = "0.2.0";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SavedCredentials {
@@ -38,6 +38,10 @@ pub struct UserProfile {
     pub war_wins: i32,
     pub battleship_wins: i32,
     #[serde(default)]
+    pub uno_wins: i32,
+    #[serde(default)]
+    pub categories_wins: i32,
+    #[serde(default)]
     pub token: String,
 }
 
@@ -51,6 +55,10 @@ pub struct LeaderboardRow {
     pub ludo_wins: i32,
     pub war_wins: i32,
     pub battleship_wins: i32,
+    #[serde(default)]
+    pub uno_wins: i32,
+    #[serde(default)]
+    pub categories_wins: i32,
     pub total_wins: i32,
 }
 
@@ -63,14 +71,12 @@ pub enum NetEvent {
         players_count: usize,
         #[serde(default)]
         order: Vec<usize>,
-        /// Aktualny ekran/gra każdego miejsca, równolegle do `order`.
         #[serde(default)]
         focus: Vec<String>,
     },
     RoomState {
         order: Vec<usize>,
         players_count: usize,
-        /// Aktualny ekran/gra każdego miejsca, równolegle do `order`.
         #[serde(default)]
         focus: Vec<String>,
     },
@@ -78,7 +84,6 @@ pub enum NetEvent {
         from_player: usize,
         #[serde(default)]
         game: String,
-        /// Stolik, którego dotyczy prośba (0/1; 2 = Chińczyk).
         #[serde(default)]
         pair: usize,
     },
@@ -97,7 +102,6 @@ pub enum NetEvent {
     ChessMove {
         from: u32,
         to: u32,
-        /// Stolik, do którego należy ruch (0/1).
         #[serde(default)]
         pair: usize,
     },
@@ -107,12 +111,37 @@ pub enum NetEvent {
     LudoMove {
         pawn_idx: usize,
     },
+    UnoStart {
+        seed: u64,
+    },
+    UnoPlay {
+        card_idx: usize,
+        chosen_color: u8,
+    },
+    UnoDraw,
+    CategoriesStart {
+        letter: char,
+        round: u32,
+    },
+    CategoriesStop {
+        #[serde(default)]
+        from_room_seat: usize,
+    },
+    CategoriesSubmit {
+        answers: [String; 5],
+        #[serde(default)]
+        from_room_seat: usize,
+    },
+    CategoriesVote {
+        votes: [[bool; 5]; 4],
+        #[serde(default)]
+        from_room_seat: usize,
+    },
     WarStep,
     BattleshipFleet {
         ships: Vec<(usize, usize, usize, bool)>,
         #[serde(default)]
         from_seat: usize,
-        /// Stolik, do którego należy flota (0/1).
         #[serde(default)]
         pair: usize,
     },
@@ -121,17 +150,14 @@ pub enum NetEvent {
         y: usize,
         #[serde(default)]
         from_seat: usize,
-        /// Stolik, do którego należy strzał (0/1).
         #[serde(default)]
         pair: usize,
     },
-    /// Informuje serwer, na jakim ekranie/grze znajduje się dane miejsce.
     FocusGame {
         game: String,
     },
     StateRequest {
         game: String,
-        /// Stolik, którego stanu dotyczy prośba (0/1; 2 = Chińczyk).
         #[serde(default)]
         pair: usize,
     },
@@ -139,7 +165,6 @@ pub enum NetEvent {
         game: String,
         #[serde(default)]
         from_seat: usize,
-        /// Stolik, którego dotyczy snapshot (0/1; 2 = Chińczyk).
         #[serde(default)]
         pair: usize,
         state: serde_json::Value,
@@ -155,17 +180,13 @@ pub struct NetClient {
     pub current_user: Option<UserProfile>,
     pub auth_error: String,
     pub leaderboard: Vec<LeaderboardRow>,
-    // --- AUTO-UPDATER ---
     pub available_update: Option<String>,
     pub update_status: String,
     pub update_sha256: Option<String>,
     pub auth_token: String,
-    // --- MULTIPLAYER POKOJE ---
     pub available_rooms: Vec<RoomStatus>,
     pub connected_room: Option<String>,
-    /// Stabilne miejsce połączenia (0..3) — nie zmienia się po wyjściu innych graczy.
     pub my_slot: usize,
-    /// Pozycja w kolejce pokoju (0..3). Pierwsze 2 osoby grają w gry 2-osobowe.
     pub my_player_idx: usize,
     pub room_order: Vec<usize>,
     pub room_focus: Vec<String>,
@@ -767,9 +788,9 @@ impl NetClient {
         let ui = &mut child_ui;
 
         let avail_w = ui.available_width();
-        let scale = (avail_w / 1100.0).clamp(0.78, 1.35);
-        let header_font = (16.5 * scale).clamp(13.0, 22.0);
-        let row_font = (16.0 * scale).clamp(12.5, 21.0);
+        let scale = (avail_w / 1150.0).clamp(0.75, 1.35);
+        let header_font = (15.5 * scale).clamp(12.0, 20.0);
+        let row_font = (15.0 * scale).clamp(11.5, 19.0);
 
         ui.horizontal(|ui| {
             ui.heading(
@@ -789,8 +810,8 @@ impl NetClient {
 
         ui.add_space(14.0 * scale);
 
-        let col_spacing = (14.0 * scale).clamp(8.0, 24.0);
-        let col_width = ((avail_w - col_spacing * 9.0) / 10.2).max(55.0);
+        let col_spacing = (10.0 * scale).clamp(6.0, 18.0);
+        let col_width = ((avail_w - col_spacing * 11.0) / 12.2).max(46.0);
 
         egui::Frame::none()
             .fill(egui::Color32::from_rgb(30, 34, 46))
@@ -812,6 +833,8 @@ impl NetClient {
                                     "♟ Szachy",
                                     "🚢 Statki",
                                     "🎲 Chińczyk",
+                                    "🌈 UNO",
+                                    "🌍 Państwa",
                                     "🃏 Pasjans",
                                     "🎰 Blackjack",
                                     "⚔ Wojna",
@@ -857,6 +880,14 @@ impl NetClient {
                                     );
                                     ui.label(
                                         egui::RichText::new(format!("{}", row.ludo_wins))
+                                            .size(row_font),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!("{}", row.uno_wins))
+                                            .size(row_font),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!("{}", row.categories_wins))
                                             .size(row_font),
                                     );
                                     ui.label(

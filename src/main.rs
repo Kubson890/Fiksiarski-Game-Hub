@@ -3,15 +3,36 @@ mod audio;
 mod battleship;
 mod blackjack;
 mod cards;
+mod categories;
 mod chess;
 mod ludo;
 mod net;
 mod solitaire;
+mod uno;
 mod war;
 
 use audio::{Sfx, SoundManager};
 use eframe::egui;
 use net::{NetClient, NetEvent};
+
+fn setup_custom_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    // Wbudowujemy pełny zestaw ikon NotoEmoji bezpośrednio w binarkę
+    fonts.font_data.insert(
+        "noto_emoji_full".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/NotoEmoji.ttf")),
+    );
+
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        family.push("noto_emoji_full".to_owned());
+    }
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        family.push("noto_emoji_full".to_owned());
+    }
+
+    ctx.set_fonts(fonts);
+}
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -26,6 +47,9 @@ fn main() -> eframe::Result<()> {
         "Fiksiarski Game Hub",
         options,
         Box::new(|cc| {
+            // Ładowanie fontu z emotkami:
+            setup_custom_fonts(&cc.egui_ctx);
+
             let mut style = (*cc.egui_ctx.style()).clone();
             style.visuals = egui::Visuals::dark();
             style.visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
@@ -49,6 +73,8 @@ enum Screen {
     Solitaire,
     Blackjack,
     Ludo,
+    Uno,
+    Categories,
     War,
     Battleship,
 }
@@ -68,6 +94,8 @@ struct GameHubApp {
     solitaire: solitaire::SolitaireGame,
     chess: chess::ChessGame,
     ludo: ludo::LudoGame,
+    uno: uno::UnoGame,
+    categories: categories::CategoriesGame,
     war: war::WarGame,
     battleship: battleship::BattleshipGame,
 }
@@ -81,6 +109,8 @@ fn screen_game_key(screen: Screen) -> Option<&'static str> {
         Screen::Chess => Some("chess"),
         Screen::Battleship => Some("battleship"),
         Screen::Ludo => Some("ludo"),
+        Screen::Uno => Some("uno"),
+        Screen::Categories => Some("categories"),
         _ => None,
     }
 }
@@ -101,9 +131,9 @@ impl GameHubApp {
                     self.last_my_pair_game = Some("battleship".to_string());
                 }
             }
-            "ludo" => self
-                .ludo
-                .setup_online(self.net.my_player_idx, count),
+            "ludo" => self.ludo.setup_online(self.net.my_player_idx, count),
+            "uno" => self.uno.setup_online(self.net.my_player_idx, count),
+            "categories" => self.categories.setup_online(self.net.my_player_idx, count),
             _ => {}
         }
     }
@@ -129,8 +159,10 @@ impl GameHubApp {
         }
 
         if old_order != new_order {
-            self.ludo
-                .setup_online(self.net.my_player_idx, self.net.room_players_count.max(1));
+            let count = self.net.room_players_count.max(1);
+            self.ludo.setup_online(self.net.my_player_idx, count);
+            self.uno.setup_online(self.net.my_player_idx, count);
+            self.categories.update_roster(self.net.my_player_idx, count);
         }
 
         if new_order.len() > old_order.len() {
@@ -249,14 +281,15 @@ impl GameHubApp {
             }
         }
         if let Some(state) = self.game_state_json(game) {
+            let is_room_game = matches!(game, "ludo" | "uno" | "categories");
             self.net.send_event(&NetEvent::GameState {
                 game: game.to_string(),
-                from_seat: if game == "ludo" {
+                from_seat: if is_room_game {
                     self.net.my_player_idx
                 } else {
                     self.net.my_pair_seat()
                 },
-                pair: if game == "ludo" { 2 } else { pair },
+                pair: if is_room_game { 2 } else { pair },
                 state,
             });
         }
@@ -267,17 +300,23 @@ impl GameHubApp {
             "chess" => Some(self.chess.state_json()),
             "battleship" => Some(self.battleship.state_json(self.net.my_pair_seat())),
             "ludo" => Some(self.ludo.state_json()),
+            "uno" => Some(self.uno.state_json()),
+            "categories" => Some(self.categories.state_json()),
             _ => None,
         }
     }
 
     fn apply_game_state(&mut self, game: &str, pair: usize, state: &serde_json::Value) {
+        // Tunelowanie synchronizacji Państwa-Miasta
+        if state.get("cat_sync").and_then(|v| v.as_bool()) == Some(true) {
+            self.categories.apply_state_json(state, &self.audio);
+            return;
+        }
+
         if game == "chess" || game == "battleship" {
             if self.net.playing_pair(game) != Some(pair) || pair == self.net.my_pair() {
                 return;
             }
-        } else if !self.net.is_spectator(4) {
-            return;
         }
         match game {
             "chess" => {
@@ -289,6 +328,12 @@ impl GameHubApp {
             "ludo" => {
                 self.ludo.apply_state_json(state);
             }
+            "uno" => {
+                self.uno.apply_state_json(state);
+            }
+            "categories" => {
+                self.categories.apply_state_json(state, &self.audio);
+            }
             _ => {}
         }
     }
@@ -296,6 +341,16 @@ impl GameHubApp {
     fn open_game(&mut self, screen: Screen) {
         self.audio.play(Sfx::Click);
         self.current_screen = screen;
+        if self.is_online_session && self.net.connected_room.is_some() {
+            if let Some(game) = screen_game_key(screen) {
+                if matches!(game, "ludo" | "uno" | "categories") && self.net.my_player_idx != 0 {
+                    self.net.send_event(&NetEvent::StateRequest {
+                        game: game.to_string(),
+                        pair: 2,
+                    });
+                }
+            }
+        }
     }
 
     fn leave_online_games(&mut self) {
@@ -303,6 +358,7 @@ impl GameHubApp {
         self.chess.spectator = false;
         self.chess.waiting = false;
         self.ludo.online_mode = false;
+        self.uno.online_mode = false;
         self.battleship.leave_online();
         self.last_my_pair_game = None;
         self.last_watched_pair = None;
@@ -336,7 +392,7 @@ impl GameHubApp {
         if game == "chess" || game == "battleship" {
             self.net.my_pair_active(game) && !self.net.is_spectator_for_game(game)
         } else {
-            game == "ludo" && self.net.room_players_count >= 2
+            matches!(game, "ludo" | "uno" | "categories") && self.net.room_players_count >= 2
         }
     }
 
@@ -361,13 +417,14 @@ fn game_label(key: &str) -> &'static str {
         "chess" => "Szachy",
         "battleship" => "Statki",
         "ludo" => "Chińczyk",
+        "uno" => "UNO",
+        "categories" => "Państwa-Miasta",
         _ => "grę",
     }
 }
 
 impl eframe::App for GameHubApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Wymuś ciemny motyw, jeśli system Windows wtrącił jasny:
         if !ctx.style().visuals.dark_mode {
             let mut style = (*ctx.style()).clone();
             style.visuals = egui::Visuals::dark();
@@ -416,6 +473,41 @@ impl eframe::App for GameHubApp {
                     }
                     NetEvent::LudoMove { pawn_idx } => {
                         self.ludo.apply_remote_pawn_move(pawn_idx, &self.audio);
+                    }
+                    NetEvent::UnoStart { seed } => {
+                        self.audio.play(Sfx::CardSlide);
+                        self.uno.init_from_seed(seed);
+                    }
+                    NetEvent::UnoPlay {
+                        card_idx,
+                        chosen_color,
+                    } => {
+                        self.uno
+                            .apply_remote_play(card_idx, chosen_color, &self.audio);
+                    }
+                    NetEvent::UnoDraw => {
+                        self.uno.apply_remote_draw(&self.audio);
+                    }
+                    NetEvent::CategoriesStart { letter, round } => {
+                        self.categories.apply_start_round(letter, round, &self.audio);
+                    }
+                    NetEvent::CategoriesStop { from_room_seat } => {
+                        self.categories
+                            .apply_remote_stop(from_room_seat, &self.audio);
+                    }
+                    NetEvent::CategoriesSubmit {
+                        answers,
+                        from_room_seat,
+                    } => {
+                        self.categories
+                            .apply_remote_submit(from_room_seat, answers, &self.audio);
+                    }
+                    NetEvent::CategoriesVote {
+                        votes,
+                        from_room_seat,
+                    } => {
+                        self.categories
+                            .apply_remote_vote(from_room_seat, votes, &self.audio);
                     }
                     NetEvent::WarStep => {
                         if self.current_screen == Screen::War {
@@ -477,6 +569,50 @@ impl eframe::App for GameHubApp {
             }
             if let Some(pawn_idx) = self.ludo.outgoing_pawn.take() {
                 self.net.send_event(&NetEvent::LudoMove { pawn_idx });
+            }
+            if let Some(seed) = self.uno.outgoing_start_seed.take() {
+                self.net.send_event(&NetEvent::UnoStart { seed });
+            }
+            if let Some((card_idx, chosen_color)) = self.uno.outgoing_play.take() {
+                self.net.send_event(&NetEvent::UnoPlay {
+                    card_idx,
+                    chosen_color,
+                });
+            }
+            if self.uno.outgoing_draw {
+                self.uno.outgoing_draw = false;
+                self.net.send_event(&NetEvent::UnoDraw);
+            }
+            if let Some((letter, round)) = self.categories.outgoing_start.take() {
+                self.net
+                    .send_event(&NetEvent::CategoriesStart { letter, round });
+            }
+            if self.categories.outgoing_stop {
+                self.categories.outgoing_stop = false;
+                self.net.send_event(&NetEvent::CategoriesStop {
+                    from_room_seat: self.net.my_player_idx,
+                });
+            }
+            if let Some(answers) = self.categories.outgoing_submit.take() {
+                self.net.send_event(&NetEvent::CategoriesSubmit {
+                    answers,
+                    from_room_seat: self.net.my_player_idx,
+                });
+            }
+            if let Some(votes) = self.categories.outgoing_vote.take() {
+                self.net.send_event(&NetEvent::CategoriesVote {
+                    votes,
+                    from_room_seat: self.net.my_player_idx,
+                });
+            }
+            if self.categories.force_broadcast_state {
+                self.categories.force_broadcast_state = false;
+                self.net.send_event(&NetEvent::GameState {
+                    game: "ludo".to_string(),
+                    from_seat: self.net.my_player_idx,
+                    pair: 2,
+                    state: self.categories.state_json(),
+                });
             }
             if self.war.outgoing_step {
                 self.war.outgoing_step = false;
@@ -754,10 +890,17 @@ impl eframe::App for GameHubApp {
                             {
                                 self.audio.play(Sfx::Click);
                                 self.net.reset_requested_by_me = true;
+                                let g_key = self.current_game_key().to_string();
+                                let pair_id =
+                                    if matches!(g_key.as_str(), "ludo" | "uno" | "categories") {
+                                        2
+                                    } else {
+                                        self.net.my_pair()
+                                    };
                                 self.net.send_event(&NetEvent::ResetRequest {
                                     from_player: self.net.my_pair_seat(),
-                                    game: self.current_game_key().to_string(),
-                                    pair: self.net.my_pair(),
+                                    game: g_key,
+                                    pair: pair_id,
                                 });
                             }
                         }
@@ -886,6 +1029,24 @@ impl eframe::App for GameHubApp {
                         self.ludo.newly_won = false;
                         if self.is_online_session {
                             self.net.report_progress("ludo", 1, None);
+                        }
+                    }
+                }
+                Screen::Uno => {
+                    self.uno.ui(ui, &self.audio);
+                    if self.uno.newly_won {
+                        self.uno.newly_won = false;
+                        if self.is_online_session {
+                            self.net.report_progress("uno", 1, None);
+                        }
+                    }
+                }
+                Screen::Categories => {
+                    self.categories.ui(ui, &self.audio);
+                    if self.categories.newly_won {
+                        self.categories.newly_won = false;
+                        if self.is_online_session {
+                            self.net.report_progress("categories", 1, None);
                         }
                     }
                 }
@@ -1176,8 +1337,14 @@ impl GameHubApp {
                         format!("🔥 W pokoju: {}/{} os.", r.players, r.max_players)
                     };
 
-                    let resp =
-                        Self::game_card(ui, egui::vec2(card_w, card_h), &title, &subtitle, 0);
+                    let resp = Self::game_card(
+                        ui,
+                        egui::vec2(card_w, card_h),
+                        &title,
+                        &subtitle,
+                        0,
+                        true,
+                    );
                     if resp.clicked() && !is_full {
                         chosen_room = Some(r.room_id.clone());
                     }
@@ -1223,9 +1390,9 @@ impl GameHubApp {
     fn render_hub(&mut self, ui: &mut egui::Ui) {
         let avail = ui.available_size();
 
-        let spacing = (avail.x.min(avail.y) * 0.032).clamp(14.0, 36.0);
-        let card_w = ((avail.x * 0.88 - spacing * 2.0) / 3.0).clamp(210.0, 420.0);
-        let card_h = ((avail.y * 0.64 - spacing) / 2.0).clamp(130.0, 290.0);
+        let spacing = (avail.x.min(avail.y) * 0.028).clamp(12.0, 28.0);
+        let card_w = ((avail.x * 0.90 - spacing * 3.0) / 4.0).clamp(185.0, 340.0);
+        let card_h = ((avail.y * 0.64 - spacing) / 2.0).clamp(130.0, 270.0);
         let card_size = egui::vec2(card_w, card_h);
 
         let title_size = (avail.y * 0.055).clamp(28.0, 52.0);
@@ -1242,10 +1409,11 @@ impl GameHubApp {
             );
             ui.add_space(spacing);
 
-            let total_grid_w = card_w * 3.0 + spacing * 2.0;
+            let total_grid_w = card_w * 4.0 + spacing * 3.0;
             let left_pad = ((avail.x - total_grid_w) / 2.0).max(0.0);
             let chess_spectators = self.spectator_count_for_screen(Screen::Chess);
             let battleship_spectators = self.spectator_count_for_screen(Screen::Battleship);
+            let mp_room_connected = self.is_online_session && self.net.connected_room.is_some();
 
             ui.horizontal(|ui| {
                 ui.add_space(left_pad);
@@ -1259,6 +1427,7 @@ impl GameHubApp {
                             "♟ Szachy",
                             "Klasyczny pojedynek na szachownicy",
                             chess_spectators,
+                            true,
                         )
                         .clicked()
                         {
@@ -1270,6 +1439,7 @@ impl GameHubApp {
                             "🚢 Statki",
                             "Taktyczna bitwa morska na radarze",
                             battleship_spectators,
+                            true,
                         )
                         .clicked()
                         {
@@ -1281,10 +1451,23 @@ impl GameHubApp {
                             "🎲 Chińczyk",
                             "Planszówka Ludo dla 2-4 graczy",
                             0,
+                            true,
                         )
                         .clicked()
                         {
                             self.open_game(Screen::Ludo);
+                        }
+                        if Self::game_card(
+                            ui,
+                            card_size,
+                            "🌈 UNO",
+                            "Kolorowa gra karciana dla 2-4 graczy",
+                            0,
+                            true,
+                        )
+                        .clicked()
+                        {
+                            self.open_game(Screen::Uno);
                         }
                         ui.end_row();
 
@@ -1294,6 +1477,7 @@ impl GameHubApp {
                             "🃏 Pasjans",
                             "Klasyczny Klondike Solitaire",
                             0,
+                            true,
                         )
                         .clicked()
                         {
@@ -1305,6 +1489,7 @@ impl GameHubApp {
                             "🎰 Blackjack",
                             "Oko / 21 przeciwko krupierowi",
                             0,
+                            true,
                         )
                         .clicked()
                         {
@@ -1316,10 +1501,30 @@ impl GameHubApp {
                             "⚔ Wojna",
                             "Szybki pojedynek o całą talię",
                             0,
+                            true,
                         )
                         .clicked()
                         {
                             self.open_game(Screen::War);
+                        }
+
+                        let cat_sub = if mp_room_connected {
+                            "Słowna rywalizacja z głosowaniem 3/4"
+                        } else {
+                            "Dostępne tylko w pokoju Multiplayer!"
+                        };
+                        if Self::game_card(
+                            ui,
+                            card_size,
+                            "🌍 Państwa-Miasta",
+                            cat_sub,
+                            0,
+                            mp_room_connected,
+                        )
+                        .clicked()
+                            && mp_room_connected
+                        {
+                            self.open_game(Screen::Categories);
                         }
                         ui.end_row();
                     });
@@ -1333,8 +1538,14 @@ impl GameHubApp {
         title: &str,
         subtitle: &str,
         spectators: usize,
+        enabled: bool,
     ) -> egui::Response {
-        let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+        let sense = if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        };
+        let (rect, response) = ui.allocate_exact_size(desired_size, sense);
 
         if ui.is_rect_visible(rect) {
             let scale_h = desired_size.y / 160.0;
@@ -1343,7 +1554,11 @@ impl GameHubApp {
 
             let visuals = ui.style().interact(&response);
 
-            let expansion = if response.hovered() { 4.0 * scale } else { 0.0 };
+            let expansion = if enabled && response.hovered() {
+                4.0 * scale
+            } else {
+                0.0
+            };
             let draw_rect = rect.expand(expansion);
 
             ui.painter().rect_filled(
@@ -1352,15 +1567,22 @@ impl GameHubApp {
                 egui::Color32::from_black_alpha(90),
             );
 
-            ui.painter().rect(
-                draw_rect,
-                14.0 * scale,
-                visuals.bg_fill,
-                visuals.bg_stroke,
-            );
+            let bg_fill = if enabled {
+                visuals.bg_fill
+            } else {
+                egui::Color32::from_rgb(24, 26, 33)
+            };
+            let bg_stroke = if enabled {
+                visuals.bg_stroke
+            } else {
+                egui::Stroke::new(1.2 * scale, egui::Color32::from_rgb(55, 58, 68))
+            };
 
-            let title_font = (23.0 * scale).clamp(15.0, 36.0);
-            let sub_font = (13.0 * scale).clamp(10.5, 19.0);
+            ui.painter()
+                .rect(draw_rect, 14.0 * scale, bg_fill, bg_stroke);
+
+            let title_font = (22.0 * scale).clamp(14.5, 34.0);
+            let sub_font = (12.5 * scale).clamp(10.0, 18.0);
 
             let text_pos = draw_rect.center() - egui::vec2(0.0, 15.0 * scale);
             ui.painter().text(
@@ -1368,7 +1590,11 @@ impl GameHubApp {
                 egui::Align2::CENTER_CENTER,
                 title,
                 egui::FontId::proportional(title_font),
-                egui::Color32::WHITE,
+                if enabled {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::from_rgb(115, 120, 132)
+                },
             );
 
             let sub_pos = draw_rect.center() + egui::vec2(0.0, 20.0 * scale);
@@ -1377,10 +1603,33 @@ impl GameHubApp {
                 egui::Align2::CENTER_CENTER,
                 subtitle,
                 egui::FontId::proportional(sub_font),
-                egui::Color32::LIGHT_GRAY,
+                if enabled {
+                    egui::Color32::LIGHT_GRAY
+                } else {
+                    egui::Color32::from_rgb(205, 125, 95)
+                },
             );
 
-            if spectators > 0 {
+            if !enabled {
+                let lock_badge = egui::Rect::from_center_size(
+                    egui::pos2(draw_rect.center().x, draw_rect.top() + 18.0 * scale),
+                    egui::vec2(150.0 * scale, 22.0 * scale),
+                );
+                ui.painter().rect_filled(
+                    lock_badge,
+                    6.0 * scale,
+                    egui::Color32::from_rgba_unmultiplied(60, 30, 30, 210),
+                );
+                ui.painter().text(
+                    lock_badge.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "TYLKO MULTIPLAYER",
+                    egui::FontId::proportional((10.5 * scale).max(8.5)),
+                    egui::Color32::from_rgb(255, 175, 130),
+                );
+            }
+
+            if spectators > 0 && enabled {
                 let badge_text = format!("👁 {}", spectators);
                 let badge_font = (13.0 * scale).clamp(10.0, 18.0);
                 let badge_size = egui::vec2(52.0 * scale, 24.0 * scale);
@@ -1411,7 +1660,7 @@ impl GameHubApp {
             }
         }
 
-        if response.hovered() {
+        if enabled && response.hovered() {
             ui.ctx().request_repaint();
         }
 
