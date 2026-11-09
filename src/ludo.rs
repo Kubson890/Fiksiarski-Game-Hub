@@ -478,7 +478,6 @@ impl LudoGame {
     pub fn ui(&mut self, ui: &mut egui::Ui, audio: &SoundManager) {
         let now = Instant::now();
 
-        // --- 1. AKTUALIZACJA ANIMACJI KOSTKI ---
         if let TurnPhase::RollingDice {
             start,
             mut last_tick,
@@ -540,7 +539,6 @@ impl LudoGame {
             }
         }
 
-        // --- 2. AKTUALIZACJA ANIMACJI SKAKANIA PIONKA ---
         let mut finished_move: Option<(usize, usize, u8)> = None;
         if let Some(anim) = &mut self.step_anim {
             let elapsed = now.duration_since(anim.leg_start).as_secs_f32();
@@ -561,7 +559,6 @@ impl LudoGame {
             self.finish_pawn_move(p, idx, final_state, audio);
         }
 
-        // --- 3. AUTOMATYKA BOTA AI (TYLKO W TRYBIE OFFLINE!) ---
         if !self.online_mode
             && self.player_types[self.current_turn] == PlayerType::Bot
             && matches!(self.phase, TurnPhase::WaitForRoll | TurnPhase::WaitForMove)
@@ -604,10 +601,10 @@ impl LudoGame {
         );
         let ui = &mut child_ui;
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if !self.online_mode {
                 if ui
-                    .button(egui::RichText::new("🔄 Nowa gra").size(16.0))
+                    .button(egui::RichText::new("🔄 Nowa gra").size(15.0))
                     .clicked()
                 {
                     audio.play(Sfx::Click);
@@ -620,7 +617,7 @@ impl LudoGame {
                         "🌐 Twój kolor: {}",
                         Self::player_name(self.my_player_idx)
                     ))
-                    .size(16.0)
+                    .size(15.0)
                     .strong()
                     .color(Self::player_color(self.my_player_idx)),
                 );
@@ -628,26 +625,51 @@ impl LudoGame {
             }
             ui.label(
                 egui::RichText::new(&self.status_text)
-                    .size(19.0)
+                    .size(17.0)
                     .strong()
                     .color(egui::Color32::WHITE),
             );
         });
 
-        ui.add_space(10.0);
+        ui.add_space(8.0);
 
         let work_rect = ui.available_rect_before_wrap();
-        let panel_w = (work_rect.width() * 0.27).clamp(210.0, 310.0);
-        let max_board_w = (work_rect.width() - panel_w - 24.0).max(280.0);
-        let board_px = max_board_w.min(work_rect.height() - 6.0).max(280.0);
-        let cell = board_px / 15.0;
+        let is_portrait = work_rect.height() > work_rect.width() || work_rect.width() < 680.0;
 
-        let total_w = board_px + 20.0 + panel_w;
-        let start_x = work_rect.left() + ((work_rect.width() - total_w) / 2.0).max(0.0);
-        let start_y = work_rect.top() + ((work_rect.height() - board_px) / 2.0).max(0.0);
+        let (board_rect, panel_rect, cell) = if is_portrait {
+            let gap = 12.0;
+            let board_px = (work_rect.width() - 8.0)
+                .min(work_rect.height() * 0.62)
+                .max(220.0);
+            let c = board_px / 15.0;
+            let bx = work_rect.center().x - board_px * 0.5;
+            let by = work_rect.top() + 2.0;
+            let b_rect = egui::Rect::from_min_size(egui::pos2(bx, by), egui::vec2(board_px, board_px));
 
-        let board_rect =
-            egui::Rect::from_min_size(egui::pos2(start_x, start_y), egui::vec2(board_px, board_px));
+            let p_top = (b_rect.bottom() + gap).min(work_rect.bottom() - 80.0);
+            let p_h = (work_rect.bottom() - p_top).max(90.0);
+            let p_rect = egui::Rect::from_min_size(egui::pos2(bx, p_top), egui::vec2(board_px, p_h));
+            (b_rect, p_rect, c)
+        } else {
+            let panel_w = (work_rect.width() * 0.27).clamp(210.0, 310.0);
+            let max_board_w = (work_rect.width() - panel_w - 24.0).max(260.0);
+            let board_px = max_board_w.min(work_rect.height() - 6.0).max(260.0);
+            let c = board_px / 15.0;
+
+            let total_w = board_px + 20.0 + panel_w;
+            let start_x = work_rect.left() + ((work_rect.width() - total_w) / 2.0).max(0.0);
+            let start_y = work_rect.top() + ((work_rect.height() - board_px) / 2.0).max(0.0);
+
+            let b_rect = egui::Rect::from_min_size(
+                egui::pos2(start_x, start_y),
+                egui::vec2(board_px, board_px),
+            );
+            let p_rect = egui::Rect::from_min_size(
+                egui::pos2(b_rect.right() + 20.0, b_rect.top()),
+                egui::vec2(panel_w, board_px),
+            );
+            (b_rect, p_rect, c)
+        };
 
         self.draw_ludo_board(ui.painter(), board_rect, cell);
 
@@ -746,159 +768,206 @@ impl LudoGame {
             );
         }
 
-        let panel_rect = egui::Rect::from_min_size(
-            egui::pos2(board_rect.right() + 20.0, board_rect.top()),
-            egui::vec2(panel_w, board_px),
-        );
-
         let mut panel_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(panel_rect)
                 .layout(egui::Layout::top_down(egui::Align::Center)),
         );
 
+        let can_human_roll = self.phase == TurnPhase::WaitForRoll
+            && self.player_types[self.current_turn] == PlayerType::Human
+            && (!self.online_mode || self.current_turn == self.my_player_idx);
+        let shown_face = match self.phase {
+            TurnPhase::RollingDice { preview_face, .. } => preview_face,
+            _ => self.dice_value,
+        };
+        let is_rolling = matches!(self.phase, TurnPhase::RollingDice { .. });
+
         egui::Frame::none()
             .fill(egui::Color32::from_rgb(36, 40, 48))
             .rounding(12.0)
-            .inner_margin(16.0)
+            .inner_margin(12.0)
             .show(&mut panel_ui, |ui| {
                 ui.set_min_size(ui.available_size());
 
-                ui.heading(
-                    egui::RichText::new("🎲 Kostka do gry")
-                        .size(20.0)
-                        .color(egui::Color32::WHITE),
-                );
-                ui.add_space(12.0);
-
-                let dice_px = (panel_w * 0.44).clamp(80.0, 120.0);
-                let (dice_rect, dice_resp) =
-                    ui.allocate_exact_size(egui::vec2(dice_px, dice_px), egui::Sense::click());
-
-                let shown_face = match self.phase {
-                    TurnPhase::RollingDice { preview_face, .. } => preview_face,
-                    _ => self.dice_value,
-                };
-                let is_rolling = matches!(self.phase, TurnPhase::RollingDice { .. });
-
-                Self::draw_dice_widget(
-                    ui.painter(),
-                    dice_rect,
-                    shown_face,
-                    Self::player_color(self.current_turn),
-                    is_rolling,
-                );
-
-                ui.add_space(12.0);
-
-                let can_human_roll = self.phase == TurnPhase::WaitForRoll
-                    && self.player_types[self.current_turn] == PlayerType::Human
-                    && (!self.online_mode || self.current_turn == self.my_player_idx);
-
-                if ui
-                    .add_enabled(
-                        can_human_roll,
-                        egui::Button::new(
-                            egui::RichText::new("🎲 Rzuć kostką!").size(18.0).strong(),
-                        )
-                        .min_size(egui::vec2(panel_w - 32.0, 42.0)),
-                    )
-                    .clicked()
-                    || (can_human_roll && dice_resp.clicked())
-                {
-                    self.start_dice_roll(audio);
-                }
-
-                ui.add_space(18.0);
-                ui.separator();
-                ui.add_space(8.0);
-
-                ui.heading(
-                    egui::RichText::new("👥 Gracze przy stole")
-                        .size(18.0)
-                        .color(egui::Color32::WHITE),
-                );
-                ui.add_space(8.0);
-
-                for p in 0..4 {
-                    let is_active = self.current_turn == p;
-                    let frame_bg = if is_active {
-                        egui::Color32::from_rgb(55, 62, 76)
-                    } else {
-                        egui::Color32::from_rgb(28, 31, 38)
-                    };
-
-                    egui::Frame::none()
-                        .fill(frame_bg)
-                        .rounding(8.0)
-                        .inner_margin(8.0)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                let finished_count =
-                                    self.pawns[p].iter().filter(|&&s| s == 57).count();
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{} ({}/4)",
-                                        Self::player_name(p),
-                                        finished_count
-                                    ))
-                                    .strong()
-                                    .color(Self::player_color(p)),
-                                );
-
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if self.online_mode {
-                                            let label = match self.player_types[p] {
-                                                PlayerType::Human => {
-                                                    if p == self.my_player_idx {
-                                                        "🧑 Ty (Online)"
-                                                    } else {
-                                                        "🌐 Gracz Online"
-                                                    }
-                                                }
-                                                _ => "⛔ Wolne miejsce",
-                                            };
-                                            ui.label(
-                                                egui::RichText::new(label)
-                                                    .size(13.0)
-                                                    .color(egui::Color32::LIGHT_GRAY),
-                                            );
-                                        } else {
-                                            let mode_txt = match self.player_types[p] {
-                                                PlayerType::Human => "🧑 Gracz",
-                                                PlayerType::Bot => "🤖 Bot",
-                                                PlayerType::Disabled => "⛔ Wył.",
-                                            };
-                                            if ui.button(mode_txt).clicked() {
-                                                audio.play(Sfx::Click);
-                                                self.player_types[p] = match self.player_types[p] {
-                                                    PlayerType::Human => PlayerType::Bot,
-                                                    PlayerType::Bot => PlayerType::Disabled,
-                                                    PlayerType::Disabled => PlayerType::Human,
-                                                };
-                                                if self.current_turn == p
-                                                    && self.player_types[p] == PlayerType::Bot
-                                                {
-                                                    self.bot_wait_until = Some(
-                                                        Instant::now()
-                                                            + std::time::Duration::from_millis(250),
-                                                    );
-                                                } else if self.current_turn == p
-                                                    && self.player_types[p] == PlayerType::Disabled
-                                                {
-                                                    self.advance_turn();
-                                                }
-                                            }
-                                        }
-                                    },
-                                );
-                            });
+                if is_portrait {
+                    ui.horizontal(|ui| {
+                        // Kolumna z kostką po lewej
+                        ui.vertical(|ui| {
+                            let dice_px = (panel_rect.height() * 0.48).clamp(52.0, 82.0);
+                            let (dice_rect, dice_resp) = ui.allocate_exact_size(
+                                egui::vec2(dice_px, dice_px),
+                                egui::Sense::click(),
+                            );
+                            Self::draw_dice_widget(
+                                ui.painter(),
+                                dice_rect,
+                                shown_face,
+                                Self::player_color(self.current_turn),
+                                is_rolling,
+                            );
+                            ui.add_space(4.0);
+                            if ui
+                                .add_enabled(
+                                    can_human_roll,
+                                    egui::Button::new(
+                                        egui::RichText::new("🎲 Rzuć!").size(14.0).strong(),
+                                    )
+                                    .min_size(egui::vec2(dice_px, 30.0)),
+                                )
+                                .clicked()
+                                || (can_human_roll && dice_resp.clicked())
+                            {
+                                self.start_dice_roll(audio);
+                            }
                         });
-                    ui.add_space(6.0);
+
+                        ui.add_space(8.0);
+
+                        // Lista graczy po prawej wewnątrz przewijanego obszaru
+                        let list_w = (ui.available_width()).max(140.0);
+                        let list_h = (panel_rect.height() - 10.0).max(80.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("ludo_portrait_players")
+                            .auto_shrink([false, false])
+                            .show_viewport(ui, |ui, _| {
+                                ui.set_width(list_w);
+                                ui.set_min_height(list_h);
+                                self.render_players_list(ui, audio);
+                            });
+                    });
+
+                } else {
+                    ui.heading(
+                        egui::RichText::new("🎲 Kostka do gry")
+                            .size(20.0)
+                            .color(egui::Color32::WHITE),
+                    );
+                    ui.add_space(12.0);
+
+                    let dice_px = (panel_rect.width() * 0.44).clamp(80.0, 120.0);
+                    let (dice_rect, dice_resp) =
+                        ui.allocate_exact_size(egui::vec2(dice_px, dice_px), egui::Sense::click());
+
+                    Self::draw_dice_widget(
+                        ui.painter(),
+                        dice_rect,
+                        shown_face,
+                        Self::player_color(self.current_turn),
+                        is_rolling,
+                    );
+
+                    ui.add_space(12.0);
+
+                    if ui
+                        .add_enabled(
+                            can_human_roll,
+                            egui::Button::new(
+                                egui::RichText::new("🎲 Rzuć kostką!").size(18.0).strong(),
+                            )
+                            .min_size(egui::vec2(panel_rect.width() - 32.0, 42.0)),
+                        )
+                        .clicked()
+                        || (can_human_roll && dice_resp.clicked())
+                    {
+                        self.start_dice_roll(audio);
+                    }
+
+                    ui.add_space(16.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+
+                    ui.heading(
+                        egui::RichText::new("👥 Gracze przy stole")
+                            .size(18.0)
+                            .color(egui::Color32::WHITE),
+                    );
+                    ui.add_space(8.0);
+
+                    self.render_players_list(ui, audio);
                 }
             });
+    }
+
+    fn render_players_list(&mut self, ui: &mut egui::Ui, audio: &SoundManager) {
+        for p in 0..4 {
+            let is_active = self.current_turn == p;
+            let frame_bg = if is_active {
+                egui::Color32::from_rgb(55, 62, 76)
+            } else {
+                egui::Color32::from_rgb(28, 31, 38)
+            };
+
+            egui::Frame::none()
+                .fill(frame_bg)
+                .rounding(8.0)
+                .inner_margin(6.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let finished_count =
+                            self.pawns[p].iter().filter(|&&s| s == 57).count();
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} ({}/4)",
+                                Self::player_name(p),
+                                finished_count
+                            ))
+                            .strong()
+                            .color(Self::player_color(p)),
+                        );
+
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                if self.online_mode {
+                                    let label = match self.player_types[p] {
+                                        PlayerType::Human => {
+                                            if p == self.my_player_idx {
+                                                "🧑 Ty"
+                                            } else {
+                                                "🌐 Online"
+                                            }
+                                        }
+                                        _ => "⛔ Wolne",
+                                    };
+                                    ui.label(
+                                        egui::RichText::new(label)
+                                            .size(12.5)
+                                            .color(egui::Color32::LIGHT_GRAY),
+                                    );
+                                } else {
+                                    let mode_txt = match self.player_types[p] {
+                                        PlayerType::Human => "🧑 Gracz",
+                                        PlayerType::Bot => "🤖 Bot",
+                                        PlayerType::Disabled => "⛔ Wył.",
+                                    };
+                                    if ui.button(mode_txt).clicked() {
+                                        audio.play(Sfx::Click);
+                                        self.player_types[p] = match self.player_types[p] {
+                                            PlayerType::Human => PlayerType::Bot,
+                                            PlayerType::Bot => PlayerType::Disabled,
+                                            PlayerType::Disabled => PlayerType::Human,
+                                        };
+                                        if self.current_turn == p
+                                            && self.player_types[p] == PlayerType::Bot
+                                        {
+                                            self.bot_wait_until = Some(
+                                                Instant::now()
+                                                    + std::time::Duration::from_millis(250),
+                                            );
+                                        } else if self.current_turn == p
+                                            && self.player_types[p] == PlayerType::Disabled
+                                        {
+                                            self.advance_turn();
+                                        }
+                                    }
+                                }
+                            },
+                        );
+                    });
+                });
+            ui.add_space(4.0);
+        }
     }
 
     fn draw_ludo_board(&self, painter: &egui::Painter, board_rect: egui::Rect, cell: f32) {

@@ -457,8 +457,9 @@ impl CategoriesGame {
         ui.painter()
             .rect_filled(full_rect, 12.0, egui::Color32::from_rgb(19, 24, 34));
 
-        let margin = (full_rect.width() * 0.022).clamp(12.0, 26.0);
+        let margin = (full_rect.width() * 0.022).clamp(10.0, 26.0);
         let content_rect = full_rect.shrink(margin);
+        let is_portrait = content_rect.height() > content_rect.width() || content_rect.width() < 680.0;
         let scale = (content_rect.width() / 1240.0)
             .min(content_rect.height() / 720.0)
             .clamp(0.75, 1.25);
@@ -470,155 +471,176 @@ impl CategoriesGame {
         );
         let ui = &mut child_ui;
 
-        ui.horizontal(|ui| {
-            let badge_size = 72.0 * scale;
-            let (badge_rect, _) = ui.allocate_exact_size(
-                egui::vec2(badge_size, badge_size),
-                egui::Sense::hover(),
-            );
-            ui.painter().circle(
-                badge_rect.center(),
-                badge_size * 0.46,
-                egui::Color32::from_rgb(42, 52, 74),
-                egui::Stroke::new(3.0_f32, egui::Color32::GOLD),
-            );
-            let shown_letter = if self.phase == CatPhase::Lobby {
-                '?'
-            } else {
-                self.letter
-            };
-            ui.painter().text(
-                badge_rect.center(),
-                egui::Align2::CENTER_CENTER,
-                shown_letter.to_string(),
-                egui::FontId::proportional(38.0 * scale),
-                egui::Color32::GOLD,
-            );
-
-            ui.add_space(12.0 * scale);
-
-            ui.vertical(|ui| {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "PAŃSTWA - MIASTA   |   Runda {}/{}   |   Weryfikacja: min. {}/{} głosów na TAK",
-                        self.round,
-                        MAX_ROUNDS,
-                        self.required_yes_votes(),
-                        self.active_players.clamp(2, 4)
-                    ))
-                    .size(18.0 * scale)
-                    .strong()
-                    .color(egui::Color32::WHITE),
-                );
-                ui.add_space(4.0 * scale);
-                ui.label(
-                    egui::RichText::new(&self.status_text)
-                        .size(15.0 * scale)
-                        .color(egui::Color32::from_rgb(255, 220, 115)),
-                );
-            });
-        });
-
-        ui.add_space(10.0 * scale);
-
-        let avail_w = ui.available_width();
-        let gap = 12.0 * scale;
-        let box_w = ((avail_w - gap * 3.0) / 4.0).max(120.0);
-        let box_h = 54.0 * scale;
-
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            for p in 0..4 {
-                let active = p < self.active_players;
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(box_w, box_h), egui::Sense::hover());
-                let bg = if !active {
-                    egui::Color32::from_rgb(24, 27, 35)
-                } else if p == self.my_player_idx {
-                    egui::Color32::from_rgb(38, 52, 76)
-                } else {
-                    egui::Color32::from_rgb(28, 34, 46)
-                };
-                let stroke = if p == self.my_player_idx && active {
-                    egui::Stroke::new(2.0_f32, Self::player_color(p))
-                } else {
-                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(60, 68, 86))
-                };
-                ui.painter().rect(rect, 10.0 * scale, bg, stroke);
-
-                let dot_pos = egui::pos2(rect.left() + 16.0 * scale, rect.center().y);
-                ui.painter().circle_filled(
-                    dot_pos,
-                    6.0 * scale,
-                    if active {
-                        Self::player_color(p)
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let badge_size = (68.0 * scale).max(52.0);
+                    let (badge_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(badge_size, badge_size),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().circle(
+                        badge_rect.center(),
+                        badge_size * 0.46,
+                        egui::Color32::from_rgb(42, 52, 74),
+                        egui::Stroke::new(3.0_f32, egui::Color32::GOLD),
+                    );
+                    let shown_letter = if self.phase == CatPhase::Lobby {
+                        '?'
                     } else {
-                        egui::Color32::DARK_GRAY
-                    },
-                );
-
-                let title = if !active {
-                    format!("Gracz #{} (Wolne)", p + 1)
-                } else if p == self.my_player_idx {
-                    format!("Gracz #{} (TY)", p + 1)
-                } else {
-                    format!("Gracz #{}", p + 1)
-                };
-                ui.painter().text(
-                    egui::pos2(rect.left() + 30.0 * scale, rect.center().y - 9.0 * scale),
-                    egui::Align2::LEFT_CENTER,
-                    title,
-                    egui::FontId::proportional(14.5 * scale),
-                    if active {
-                        egui::Color32::WHITE
-                    } else {
-                        egui::Color32::GRAY
-                    },
-                );
-
-                if active {
-                    let state_badge = match self.phase {
-                        CatPhase::Writing => {
-                            if self.submitted[p] {
-                                "[Gotowy]"
-                            } else {
-                                "[Pisze...]"
-                            }
-                        }
-                        CatPhase::Voting => {
-                            if self.voted[p] {
-                                "[Zagłosował]"
-                            } else {
-                                "[Ocenia...]"
-                            }
-                        }
-                        _ => "",
+                        self.letter
                     };
                     ui.painter().text(
-                        egui::pos2(rect.left() + 30.0 * scale, rect.center().y + 10.0 * scale),
-                        egui::Align2::LEFT_CENTER,
-                        format!("Punkty: {}   {}", self.total_scores[p], state_badge),
-                        egui::FontId::proportional(13.0 * scale),
+                        badge_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        shown_letter.to_string(),
+                        egui::FontId::proportional((36.0 * scale).max(26.0)),
                         egui::Color32::GOLD,
                     );
+
+                    ui.add_space(10.0 * scale);
+
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "PAŃSTWA - MIASTA  |  Runda {}/{}  |  Głosy: min. {}/{}",
+                                self.round,
+                                MAX_ROUNDS,
+                                self.required_yes_votes(),
+                                self.active_players.clamp(2, 4)
+                            ))
+                            .size((17.5 * scale).max(13.5))
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                        );
+                        ui.add_space(4.0 * scale);
+                        ui.label(
+                            egui::RichText::new(&self.status_text)
+                                .size((14.5 * scale).max(12.0))
+                                .color(egui::Color32::from_rgb(255, 220, 115)),
+                        );
+                    });
+                });
+
+                ui.add_space(10.0 * scale);
+
+                let avail_w = ui.available_width();
+                let gap = 10.0 * scale;
+                let cols = if is_portrait { 2 } else { 4 };
+                let box_w = ((avail_w - gap * (cols - 1) as f32) / cols as f32).max(130.0);
+                let box_h = (52.0 * scale).max(46.0);
+
+                egui::Grid::new("cat_players_top_grid")
+                    .spacing([gap, gap])
+                    .show(ui, |ui| {
+                        for p in 0..4 {
+                            let active = p < self.active_players;
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(box_w, box_h),
+                                egui::Sense::hover(),
+                            );
+                            let bg = if !active {
+                                egui::Color32::from_rgb(24, 27, 35)
+                            } else if p == self.my_player_idx {
+                                egui::Color32::from_rgb(38, 52, 76)
+                            } else {
+                                egui::Color32::from_rgb(28, 34, 46)
+                            };
+                            let stroke = if p == self.my_player_idx && active {
+                                egui::Stroke::new(2.0_f32, Self::player_color(p))
+                            } else {
+                                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(60, 68, 86))
+                            };
+                            ui.painter().rect(rect, 10.0 * scale, bg, stroke);
+
+                            let dot_pos =
+                                egui::pos2(rect.left() + 14.0 * scale, rect.center().y);
+                            ui.painter().circle_filled(
+                                dot_pos,
+                                5.5 * scale,
+                                if active {
+                                    Self::player_color(p)
+                                } else {
+                                    egui::Color32::DARK_GRAY
+                                },
+                            );
+
+                            let title = if !active {
+                                format!("Gracz #{} (Wolne)", p + 1)
+                            } else if p == self.my_player_idx {
+                                format!("Gracz #{} (TY)", p + 1)
+                            } else {
+                                format!("Gracz #{}", p + 1)
+                            };
+                            ui.painter().text(
+                                egui::pos2(
+                                    rect.left() + 26.0 * scale,
+                                    rect.center().y - 8.5 * scale,
+                                ),
+                                egui::Align2::LEFT_CENTER,
+                                title,
+                                egui::FontId::proportional((14.0 * scale).max(11.5)),
+                                if active {
+                                    egui::Color32::WHITE
+                                } else {
+                                    egui::Color32::GRAY
+                                },
+                            );
+
+                            if active {
+                                let state_badge = match self.phase {
+                                    CatPhase::Writing => {
+                                        if self.submitted[p] {
+                                            "[Gotowy]"
+                                        } else {
+                                            "[Pisze...]"
+                                        }
+                                    }
+                                    CatPhase::Voting => {
+                                        if self.voted[p] {
+                                            "[Zagłosował]"
+                                        } else {
+                                            "[Ocenia...]"
+                                        }
+                                    }
+                                    _ => "",
+                                };
+                                ui.painter().text(
+                                    egui::pos2(
+                                        rect.left() + 26.0 * scale,
+                                        rect.center().y + 9.5 * scale,
+                                    ),
+                                    egui::Align2::LEFT_CENTER,
+                                    format!("Pkt: {}  {}", self.total_scores[p], state_badge),
+                                    egui::FontId::proportional((12.5 * scale).max(10.5)),
+                                    egui::Color32::GOLD,
+                                );
+                            }
+
+                            if (p + 1) % cols == 0 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+
+                ui.add_space(12.0 * scale);
+
+                match self.phase {
+                    CatPhase::Lobby => self.render_lobby(ui, scale, audio),
+                    CatPhase::Writing => self.render_writing(ui, scale, audio),
+                    CatPhase::Voting => self.render_voting(ui, scale, audio),
+                    CatPhase::RoundSummary | CatPhase::GameOver => {
+                        self.render_summary(ui, scale, audio)
+                    }
                 }
-            }
-        });
-
-        ui.add_space(12.0 * scale);
-
-        match self.phase {
-            CatPhase::Lobby => self.render_lobby(ui, scale, audio),
-            CatPhase::Writing => self.render_writing(ui, scale, audio),
-            CatPhase::Voting => self.render_voting(ui, scale, audio),
-            CatPhase::RoundSummary | CatPhase::GameOver => self.render_summary(ui, scale, audio),
-        }
+            });
     }
 
     fn render_lobby(&mut self, ui: &mut egui::Ui, scale: f32, audio: &SoundManager) {
         let avail = ui.available_size();
         ui.vertical_centered(|ui| {
-            ui.add_space((avail.y * 0.14).max(16.0));
+            ui.add_space((avail.y * 0.08).max(12.0));
             egui::Frame::none()
                 .fill(egui::Color32::from_rgb(28, 34, 48))
                 .rounding(16.0 * scale)
@@ -626,12 +648,13 @@ impl CategoriesGame {
                     1.5_f32,
                     egui::Color32::from_rgb(75, 90, 120),
                 ))
-                .inner_margin(28.0 * scale)
+                .inner_margin(22.0 * scale)
                 .show(ui, |ui| {
-                    ui.set_width((540.0 * scale).min(avail.x * 0.92));
+                    let box_w = (540.0 * scale).min(avail.x - 36.0).max(240.0);
+                    ui.set_width(box_w);
                     ui.heading(
                         egui::RichText::new("Zasady gry Państwa-Miasta Online")
-                            .size(22.0 * scale)
+                            .size((21.0 * scale).max(16.0))
                             .strong()
                             .color(egui::Color32::WHITE),
                     );
@@ -643,10 +666,10 @@ impl CategoriesGame {
                              3. Brak sztywnego słownika — gracze sami głosują nad poprawnością wpisanych słów (wymagane min. 3/4 głosów na TAK).\n\
                              4. Punktacja: 15 pkt (jedyna odpowiedź w kategorii), 10 pkt (unikalne słowo), 5 pkt (powtórzone słowo).",
                         )
-                        .size(14.5 * scale)
+                        .size((14.0 * scale).max(12.0))
                         .color(egui::Color32::LIGHT_GRAY),
                     );
-                    ui.add_space(20.0 * scale);
+                    ui.add_space(18.0 * scale);
 
                     let can_start = self.active_players >= 2 && self.my_player_idx == 0;
                     if ui
@@ -654,12 +677,12 @@ impl CategoriesGame {
                             can_start,
                             egui::Button::new(
                                 egui::RichText::new("★ Wylosuj literę i rozpocznij Rundę #1!")
-                                    .size(18.0 * scale)
+                                    .size((16.5 * scale).max(13.5))
                                     .strong()
                                     .color(egui::Color32::WHITE),
                             )
                             .fill(egui::Color32::from_rgb(45, 145, 85))
-                            .min_size(egui::vec2(340.0 * scale, 48.0 * scale)),
+                            .min_size(egui::vec2((box_w - 20.0).max(200.0), 46.0 * scale)),
                         )
                         .clicked()
                     {
@@ -689,15 +712,15 @@ impl CategoriesGame {
             ui.painter().text(
                 bar_rect.center(),
                 egui::Align2::CENTER_CENTER,
-                format!("⏱ ALARM STOP! Pozostało {:.1} s na wpisanie słów!", left),
-                egui::FontId::proportional(14.5 * scale),
+                format!("⏱ ALARM STOP! Pozostało {:.1} s!", left),
+                egui::FontId::proportional((14.0 * scale).max(11.5)),
                 egui::Color32::WHITE,
             );
             ui.add_space(10.0 * scale);
         }
 
         let outer_w = ui.available_width();
-        let pad = 20.0 * scale;
+        let pad = (16.0 * scale).max(10.0);
 
         egui::Frame::none()
             .fill(egui::Color32::from_rgb(27, 33, 46))
@@ -708,7 +731,7 @@ impl CategoriesGame {
             ))
             .inner_margin(pad)
             .show(ui, |ui| {
-                ui.set_max_width((outer_w - pad * 2.0).max(320.0));
+                ui.set_max_width((outer_w - pad * 2.0).max(260.0));
                 let mut valid_count = 0usize;
 
                 for (idx, &cat_name) in CATEGORY_NAMES.iter().enumerate() {
@@ -720,12 +743,12 @@ impl CategoriesGame {
 
                     ui.horizontal(|ui| {
                         let (dot_rect, _) = ui.allocate_exact_size(
-                            egui::vec2(22.0 * scale, 28.0 * scale),
+                            egui::vec2(20.0 * scale, 28.0 * scale),
                             egui::Sense::hover(),
                         );
                         ui.painter().circle_filled(
                             dot_rect.center(),
-                            6.5 * scale,
+                            6.0 * scale,
                             if is_ok {
                                 egui::Color32::from_rgb(75, 225, 115)
                             } else {
@@ -734,19 +757,19 @@ impl CategoriesGame {
                         );
 
                         ui.add_sized(
-                            [130.0 * scale, 32.0 * scale],
+                            [(110.0 * scale).max(78.0), 32.0 * scale],
                             egui::Label::new(
                                 egui::RichText::new(format!("{}:", cat_name))
-                                    .size(16.5 * scale)
+                                    .size((16.0 * scale).max(13.0))
                                     .strong()
                                     .color(egui::Color32::WHITE),
                             ),
                         );
 
-                        let input_w = (ui.available_width() - 8.0).max(140.0);
+                        let input_w = (ui.available_width() - 6.0).max(110.0);
                         let edit = egui::TextEdit::singleline(&mut self.my_inputs[idx])
                             .hint_text(format!("Na literę {}...", self.letter))
-                            .font(egui::FontId::proportional(16.5 * scale))
+                            .font(egui::FontId::proportional((16.0 * scale).max(13.5)))
                             .desired_width(input_w);
                         ui.add_enabled(!self.my_submitted, edit);
                     });
@@ -764,13 +787,13 @@ impl CategoriesGame {
                         .add_enabled(
                             can_stop,
                             egui::Button::new(
-                                egui::RichText::new("⏱ STOP! Mam wszystkie 5 (odliczaj 10s)")
-                                    .size(16.0 * scale)
+                                egui::RichText::new("⏱ STOP! Mam wszystkie 5 (10s)")
+                                    .size((15.0 * scale).max(12.5))
                                     .strong()
                                     .color(egui::Color32::WHITE),
                             )
                             .fill(egui::Color32::from_rgb(205, 55, 55))
-                            .min_size(egui::vec2(300.0 * scale, 42.0 * scale)),
+                            .min_size(egui::vec2(240.0 * scale, 40.0 * scale)),
                         )
                         .clicked()
                     {
@@ -779,31 +802,28 @@ impl CategoriesGame {
                         self.submit_my_answers(audio);
                     }
 
-                    ui.add_space(10.0 * scale);
-
                     if ui
                         .add_enabled(
                             !self.my_submitted,
                             egui::Button::new(
                                 egui::RichText::new(if self.my_submitted {
-                                    "Odpowiedzi wysłane (czekam na resztę...)"
+                                    "Wysłane (czekam...)"
                                 } else {
                                     "Wyślij swoje odpowiedzi"
                                 })
-                                .size(15.5 * scale)
+                                .size((15.0 * scale).max(12.5))
                                 .strong(),
                             )
-                            .min_size(egui::vec2(250.0 * scale, 42.0 * scale)),
+                            .min_size(egui::vec2(210.0 * scale, 40.0 * scale)),
                         )
                         .clicked()
                     {
                         self.submit_my_answers(audio);
                     }
 
-                    ui.add_space(10.0 * scale);
                     ui.label(
-                        egui::RichText::new(format!("Poprawnie wypełnione: {}/5", valid_count))
-                            .size(15.0 * scale)
+                        egui::RichText::new(format!("Wypełnione: {}/5", valid_count))
+                            .size((14.5 * scale).max(12.0))
                             .color(if all_filled {
                                 egui::Color32::from_rgb(90, 235, 125)
                             } else {
@@ -818,7 +838,7 @@ impl CategoriesGame {
         let active = self.active_players.clamp(2, 4);
         let req_votes = self.required_yes_votes();
         let outer_w = ui.available_width();
-        let pad = 16.0 * scale;
+        let pad = (14.0 * scale).max(8.0);
 
         egui::Frame::none()
             .fill(egui::Color32::from_rgb(26, 32, 44))
@@ -829,117 +849,121 @@ impl CategoriesGame {
             ))
             .inner_margin(pad)
             .show(ui, |ui| {
-                let inner_w = (outer_w - pad * 2.0 - 8.0).max(320.0);
+                let inner_w = (outer_w - pad * 2.0 - 8.0).max(260.0);
                 ui.set_max_width(inner_w);
 
                 ui.label(
                     egui::RichText::new(format!(
-                        "Kliknij na odpowiedź, aby zmienić swój głos ([TAK] / [NIE]). Słowo zostaje uznane przy min. {}/{} głosach na TAK:",
+                        "Kliknij na odpowiedź, aby zmienić swój głos ([TAK] / [NIE]). Wymagane min. {}/{} głosów na TAK:",
                         req_votes, active
                     ))
-                    .size(14.5 * scale)
+                    .size((14.0 * scale).max(11.5))
                     .color(egui::Color32::LIGHT_GRAY),
                 );
                 ui.add_space(10.0 * scale);
 
-                let cat_col_w = (125.0 * scale).clamp(95.0, 155.0);
-                let col_gap = 12.0 * scale;
+                let cat_col_w = (110.0 * scale).clamp(80.0, 145.0);
+                let col_gap = (10.0 * scale).max(6.0);
                 let total_gaps = col_gap * active as f32;
                 let player_col_w =
-                    ((inner_w - cat_col_w - total_gaps) / active as f32).max(105.0);
+                    ((inner_w - cat_col_w - total_gaps) / active as f32).max(115.0);
 
-                egui::Grid::new("categories_voting_grid")
-                    .striped(true)
-                    .spacing([col_gap, 10.0 * scale])
+                egui::ScrollArea::horizontal()
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        ui.add_sized(
-                            [cat_col_w, 26.0 * scale],
-                            egui::Label::new(
-                                egui::RichText::new("Kategoria")
-                                    .size(15.5 * scale)
-                                    .strong()
-                                    .color(egui::Color32::GOLD),
-                            ),
-                        );
-                        for p in 0..active {
-                            ui.add_sized(
-                                [player_col_w, 26.0 * scale],
-                                egui::Label::new(
-                                    egui::RichText::new(if p == self.my_player_idx {
-                                        format!("Gracz #{} (TY)", p + 1)
-                                    } else {
-                                        format!("Gracz #{}", p + 1)
-                                    })
-                                    .size(15.5 * scale)
-                                    .strong()
-                                    .color(Self::player_color(p)),
-                                ),
-                            );
-                        }
-                        ui.end_row();
-
-                        for (c_idx, &cat_name) in CATEGORY_NAMES.iter().enumerate() {
-                            ui.add_sized(
-                                [cat_col_w, 34.0 * scale],
-                                egui::Label::new(
-                                    egui::RichText::new(cat_name)
-                                        .size(15.5 * scale)
-                                        .strong()
-                                        .color(egui::Color32::WHITE),
-                                ),
-                            );
-
-                            for p in 0..active {
-                                let word = self.all_answers[p][c_idx].trim();
-                                let valid_letter = word.chars().count() >= 2
-                                    && Self::is_valid_prefix(word, self.letter);
-
-                                if !valid_letter {
+                        egui::Grid::new("categories_voting_grid")
+                            .striped(true)
+                            .spacing([col_gap, 8.0 * scale])
+                            .show(ui, |ui| {
+                                ui.add_sized(
+                                    [cat_col_w, 26.0 * scale],
+                                    egui::Label::new(
+                                        egui::RichText::new("Kategoria")
+                                            .size((14.5 * scale).max(12.0))
+                                            .strong()
+                                            .color(egui::Color32::GOLD),
+                                    ),
+                                );
+                                for p in 0..active {
                                     ui.add_sized(
-                                        [player_col_w, 34.0 * scale],
+                                        [player_col_w, 26.0 * scale],
                                         egui::Label::new(
-                                            egui::RichText::new(if word.is_empty() {
-                                                "— (brak) —".to_string()
+                                            egui::RichText::new(if p == self.my_player_idx {
+                                                format!("Gracz #{} (TY)", p + 1)
                                             } else {
-                                                format!("{} (zła litera)", word)
+                                                format!("Gracz #{}", p + 1)
                                             })
-                                            .size(14.0 * scale)
-                                            .color(egui::Color32::GRAY),
+                                            .size((14.5 * scale).max(12.0))
+                                            .strong()
+                                            .color(Self::player_color(p)),
                                         ),
                                     );
-                                } else {
-                                    let my_vote = self.votes[self.my_player_idx][p][c_idx];
-                                    let btn_label = if my_vote {
-                                        format!("[TAK] {}", word)
-                                    } else {
-                                        format!("[NIE] {}", word)
-                                    };
-                                    let btn_fill = if my_vote {
-                                        egui::Color32::from_rgb(35, 115, 62)
-                                    } else {
-                                        egui::Color32::from_rgb(135, 42, 42)
-                                    };
-
-                                    let btn = egui::Button::new(
-                                        egui::RichText::new(btn_label)
-                                            .size(14.5 * scale)
-                                            .color(egui::Color32::WHITE)
-                                            .strong(),
-                                    )
-                                    .fill(btn_fill)
-                                    .min_size(egui::vec2(player_col_w, 34.0 * scale));
-
-                                    if ui.add_enabled(!self.my_voted, btn).clicked() {
-                                        audio.play(Sfx::Click);
-                                        self.votes[self.my_player_idx][p][c_idx] = !my_vote;
-                                    }
                                 }
-                            }
-                            ui.end_row();
-                        }
+                                ui.end_row();
+
+                                for (c_idx, &cat_name) in CATEGORY_NAMES.iter().enumerate() {
+                                    ui.add_sized(
+                                        [cat_col_w, 34.0 * scale],
+                                        egui::Label::new(
+                                            egui::RichText::new(cat_name)
+                                                .size((14.5 * scale).max(12.0))
+                                                .strong()
+                                                .color(egui::Color32::WHITE),
+                                        ),
+                                    );
+
+                                    for p in 0..active {
+                                        let word = self.all_answers[p][c_idx].trim();
+                                        let valid_letter = word.chars().count() >= 2
+                                            && Self::is_valid_prefix(word, self.letter);
+
+                                        if !valid_letter {
+                                            ui.add_sized(
+                                                [player_col_w, 34.0 * scale],
+                                                egui::Label::new(
+                                                    egui::RichText::new(if word.is_empty() {
+                                                        "— (brak) —".to_string()
+                                                    } else {
+                                                        format!("{} (zła litera)", word)
+                                                    })
+                                                    .size((13.5 * scale).max(11.0))
+                                                    .color(egui::Color32::GRAY),
+                                                ),
+                                            );
+                                        } else {
+                                            let my_vote = self.votes[self.my_player_idx][p][c_idx];
+                                            let btn_label = if my_vote {
+                                                format!("[TAK] {}", word)
+                                            } else {
+                                                format!("[NIE] {}", word)
+                                            };
+                                            let btn_fill = if my_vote {
+                                                egui::Color32::from_rgb(35, 115, 62)
+                                            } else {
+                                                egui::Color32::from_rgb(135, 42, 42)
+                                            };
+
+                                            let btn = egui::Button::new(
+                                                egui::RichText::new(btn_label)
+                                                    .size((14.0 * scale).max(11.5))
+                                                    .color(egui::Color32::WHITE)
+                                                    .strong(),
+                                            )
+                                            .fill(btn_fill)
+                                            .min_size(egui::vec2(player_col_w, 34.0 * scale));
+
+                                            if ui.add_enabled(!self.my_voted, btn).clicked() {
+                                                audio.play(Sfx::Click);
+                                                self.votes[self.my_player_idx][p][c_idx] = !my_vote;
+                                            }
+                                        }
+                                    }
+                                    ui.end_row();
+                                }
+                            });
                     });
 
-                ui.add_space(16.0 * scale);
+                ui.add_space(14.0 * scale);
 
                 ui.horizontal(|ui| {
                     if ui
@@ -947,16 +971,16 @@ impl CategoriesGame {
                             !self.my_voted,
                             egui::Button::new(
                                 egui::RichText::new(if self.my_voted {
-                                    "Głosy zatwierdzone — czekam na pozostałych graczy..."
+                                    "Głosy zatwierdzone — czekam na resztę..."
                                 } else {
                                     "Zatwierdź moje głosy i podlicz punkty"
                                 })
-                                .size(16.0 * scale)
+                                .size((15.0 * scale).max(12.5))
                                 .strong()
                                 .color(egui::Color32::WHITE),
                             )
                             .fill(egui::Color32::from_rgb(50, 135, 220))
-                            .min_size(egui::vec2(340.0 * scale, 42.0 * scale)),
+                            .min_size(egui::vec2((inner_w.min(340.0)).max(220.0), 42.0 * scale)),
                         )
                         .clicked()
                     {
@@ -970,7 +994,7 @@ impl CategoriesGame {
         let active = self.active_players.clamp(2, 4);
         let req_votes = self.required_yes_votes();
         let outer_w = ui.available_width();
-        let pad = 16.0 * scale;
+        let pad = (14.0 * scale).max(8.0);
 
         egui::Frame::none()
             .fill(egui::Color32::from_rgb(26, 32, 44))
@@ -978,88 +1002,97 @@ impl CategoriesGame {
             .stroke(egui::Stroke::new(1.5_f32, egui::Color32::GOLD))
             .inner_margin(pad)
             .show(ui, |ui| {
-                let inner_w = (outer_w - pad * 2.0 - 8.0).max(320.0);
+                let inner_w = (outer_w - pad * 2.0 - 8.0).max(260.0);
                 ui.set_max_width(inner_w);
 
-                let cat_col_w = (125.0 * scale).clamp(95.0, 155.0);
-                let col_gap = 12.0 * scale;
+                let cat_col_w = (110.0 * scale).clamp(80.0, 145.0);
+                let col_gap = (10.0 * scale).max(6.0);
                 let total_gaps = col_gap * active as f32;
                 let player_col_w =
-                    ((inner_w - cat_col_w - total_gaps) / active as f32).max(105.0);
+                    ((inner_w - cat_col_w - total_gaps) / active as f32).max(115.0);
 
-                egui::Grid::new("categories_summary_grid")
-                    .striped(true)
-                    .spacing([col_gap, 10.0 * scale])
+                egui::ScrollArea::horizontal()
+                    .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        ui.add_sized(
-                            [cat_col_w, 26.0 * scale],
-                            egui::Label::new(
-                                egui::RichText::new("Kategoria")
-                                    .size(15.5 * scale)
-                                    .strong()
-                                    .color(egui::Color32::GOLD),
-                            ),
-                        );
-                        for p in 0..active {
-                            ui.add_sized(
-                                [player_col_w, 26.0 * scale],
-                                egui::Label::new(
-                                    egui::RichText::new(format!(
-                                        "Gracz #{} ({} pkt)",
-                                        p + 1,
-                                        self.total_scores[p]
-                                    ))
-                                    .size(15.5 * scale)
-                                    .strong()
-                                    .color(Self::player_color(p)),
-                                ),
-                            );
-                        }
-                        ui.end_row();
-
-                        for (c_idx, &cat_name) in CATEGORY_NAMES.iter().enumerate() {
-                            ui.add_sized(
-                                [cat_col_w, 30.0 * scale],
-                                egui::Label::new(
-                                    egui::RichText::new(cat_name)
-                                        .size(15.5 * scale)
-                                        .strong()
-                                        .color(egui::Color32::WHITE),
-                                ),
-                            );
-
-                            for p in 0..active {
-                                let word = self.all_answers[p][c_idx].trim();
-                                let pts = self.round_points[p][c_idx];
-                                let yes_cnt = self.yes_votes_for(p, c_idx);
-
-                                let txt = if word.is_empty() {
-                                    "— (0 pkt)".to_string()
-                                } else {
-                                    format!("{} (+{} pkt | {}/{})", word, pts, yes_cnt, active)
-                                };
-                                let col = if pts >= 10 {
-                                    egui::Color32::from_rgb(90, 240, 130)
-                                } else if pts == 5 {
-                                    egui::Color32::GOLD
-                                } else if yes_cnt < req_votes {
-                                    egui::Color32::from_rgb(235, 95, 95)
-                                } else {
-                                    egui::Color32::GRAY
-                                };
-
+                        egui::Grid::new("categories_summary_grid")
+                            .striped(true)
+                            .spacing([col_gap, 8.0 * scale])
+                            .show(ui, |ui| {
                                 ui.add_sized(
-                                    [player_col_w, 30.0 * scale],
+                                    [cat_col_w, 26.0 * scale],
                                     egui::Label::new(
-                                        egui::RichText::new(txt).size(14.5 * scale).color(col),
+                                        egui::RichText::new("Kategoria")
+                                            .size((14.5 * scale).max(12.0))
+                                            .strong()
+                                            .color(egui::Color32::GOLD),
                                     ),
                                 );
-                            }
-                            ui.end_row();
-                        }
+                                for p in 0..active {
+                                    ui.add_sized(
+                                        [player_col_w, 26.0 * scale],
+                                        egui::Label::new(
+                                            egui::RichText::new(format!(
+                                                "Gracz #{} ({} pkt)",
+                                                p + 1,
+                                                self.total_scores[p]
+                                            ))
+                                            .size((14.5 * scale).max(12.0))
+                                            .strong()
+                                            .color(Self::player_color(p)),
+                                        ),
+                                    );
+                                }
+                                ui.end_row();
+
+                                for (c_idx, &cat_name) in CATEGORY_NAMES.iter().enumerate() {
+                                    ui.add_sized(
+                                        [cat_col_w, 30.0 * scale],
+                                        egui::Label::new(
+                                            egui::RichText::new(cat_name)
+                                                .size((14.5 * scale).max(12.0))
+                                                .strong()
+                                                .color(egui::Color32::WHITE),
+                                        ),
+                                    );
+
+                                    for p in 0..active {
+                                        let word = self.all_answers[p][c_idx].trim();
+                                        let pts = self.round_points[p][c_idx];
+                                        let yes_cnt = self.yes_votes_for(p, c_idx);
+
+                                        let txt = if word.is_empty() {
+                                            "— (0 pkt)".to_string()
+                                        } else {
+                                            format!(
+                                                "{} (+{} pkt | {}/{})",
+                                                word, pts, yes_cnt, active
+                                            )
+                                        };
+                                        let col = if pts >= 10 {
+                                            egui::Color32::from_rgb(90, 240, 130)
+                                        } else if pts == 5 {
+                                            egui::Color32::GOLD
+                                        } else if yes_cnt < req_votes {
+                                            egui::Color32::from_rgb(235, 95, 95)
+                                        } else {
+                                            egui::Color32::GRAY
+                                        };
+
+                                        ui.add_sized(
+                                            [player_col_w, 30.0 * scale],
+                                            egui::Label::new(
+                                                egui::RichText::new(txt)
+                                                    .size((13.5 * scale).max(11.0))
+                                                    .color(col),
+                                            ),
+                                        );
+                                    }
+                                    ui.end_row();
+                                }
+                            });
                     });
 
-                ui.add_space(16.0 * scale);
+                ui.add_space(14.0 * scale);
 
                 if self.my_player_idx == 0 {
                     let next_round = if self.phase == CatPhase::GameOver {
@@ -1080,12 +1113,12 @@ impl CategoriesGame {
                         .add(
                             egui::Button::new(
                                 egui::RichText::new(btn_label)
-                                    .size(16.5 * scale)
+                                    .size((15.5 * scale).max(12.5))
                                     .strong()
                                     .color(egui::Color32::WHITE),
                             )
                             .fill(egui::Color32::from_rgb(45, 145, 85))
-                            .min_size(egui::vec2(340.0 * scale, 42.0 * scale)),
+                            .min_size(egui::vec2((inner_w.min(340.0)).max(220.0), 42.0 * scale)),
                         )
                         .clicked()
                     {
@@ -1094,7 +1127,7 @@ impl CategoriesGame {
                 } else {
                     ui.label(
                         egui::RichText::new("Czekam aż Gracz #1 rozpocznie kolejną rundę...")
-                            .size(15.0 * scale)
+                            .size((14.5 * scale).max(12.0))
                             .color(egui::Color32::LIGHT_GRAY),
                     );
                 }

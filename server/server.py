@@ -7,6 +7,7 @@ import json
 import html
 import time
 from contextlib import contextmanager
+import asyncio
 from collections import defaultdict
 
 try:
@@ -21,6 +22,15 @@ try:
 except ImportError:
     HAS_BCRYPT = False
 from fastapi import FastAPI, HTTPException, Form, UploadFile, File, WebSocket, WebSocketDisconnect, Depends, status, Request
+
+async def _keepalive(ws: WebSocket):
+    """Send a Ping every 25 s to keep the connection alive."""
+    while True:
+        try:
+            await asyncio.sleep(25)
+            await ws.send_json({"type": "Ping"})
+        except Exception:
+            break
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, FileResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel
@@ -50,6 +60,7 @@ DEFAULT_ROOMS = ["POKOJ1", "POKOJ2"]
 rooms: Dict[str, Dict[int, WebSocket]] = {r: {} for r in DEFAULT_ROOMS}
 room_order: Dict[str, list[int]] = {r: [] for r in DEFAULT_ROOMS}
 room_focus: Dict[str, list[str]] = {r: [] for r in DEFAULT_ROOMS}
+room_nicks: Dict[str, Dict[int, str]] = {r: {} for r in DEFAULT_ROOMS}
 room_resets: Dict[str, Dict[int, dict | None]] = {
     r: {0: None, 1: None, 2: None} for r in DEFAULT_ROOMS
 }
@@ -204,6 +215,206 @@ class StatUpdateRequest(BaseModel):
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():
     return Response(content=b"", media_type="image/x-icon")
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def homepage():
+    ver_info = get_version_info()
+    linux_has = os.path.exists(LINUX_BINARY_PATH)
+    win_has = os.path.exists(WINDOWS_BINARY_PATH)
+
+    dl_buttons = ""
+    if linux_has:
+        dl_buttons += """
+        <a class="btn btn-linux" href="/api/download_update?platform=linux">
+            🐧 Pobierz na Linuksa (.AppImage)
+        </a>"""
+    if win_has:
+        dl_buttons += """
+        <a class="btn btn-win" href="/api/download_update?platform=windows">
+            🪟 Pobierz na Windowsa (.exe)
+        </a>"""
+    if not dl_buttons:
+        dl_buttons = "<p class='no-dl'>Brak dostępnych plików do pobrania.</p>"
+
+    return f"""<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Fiksiarski Game Hub</title>
+    <style>
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%);
+            min-height: 100vh;
+            color: #cdd6f4;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 40px 20px;
+        }}
+        .hero {{
+            text-align: center;
+            max-width: 760px;
+            width: 100%;
+        }}
+        .logo {{
+            font-size: 72px;
+            margin-bottom: 12px;
+            filter: drop-shadow(0 0 20px #89b4fa88);
+        }}
+        h1 {{
+            font-size: 2.6rem;
+            font-weight: 800;
+            background: linear-gradient(90deg, #89b4fa, #cba6f7, #f38ba8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 12px;
+        }}
+        .subtitle {{
+            font-size: 1.15rem;
+            color: #a6adc8;
+            margin-bottom: 36px;
+            line-height: 1.6;
+        }}
+        .cards {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 16px;
+            margin: 32px 0;
+        }}
+        .card {{
+            background: #1e1e2e;
+            border: 1px solid #313244;
+            border-radius: 14px;
+            padding: 22px 14px;
+            text-align: center;
+            transition: transform .2s, border-color .2s;
+        }}
+        .card:hover {{ transform: translateY(-4px); border-color: #89b4fa; }}
+        .card .icon {{ font-size: 2.4rem; margin-bottom: 8px; }}
+        .card .name {{ font-weight: 600; font-size: .95rem; color: #cdd6f4; }}
+        .badges {{
+            display: flex;
+            gap: 12px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin: 28px 0;
+        }}
+        .badge {{
+            background: #313244;
+            border-radius: 20px;
+            padding: 6px 16px;
+            font-size: .85rem;
+            color: #a6adc8;
+        }}
+        .dl-section {{
+            margin-top: 32px;
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }}
+        .btn {{
+            display: inline-block;
+            padding: 14px 28px;
+            border-radius: 10px;
+            font-size: 1rem;
+            font-weight: 700;
+            text-decoration: none;
+            transition: opacity .2s, transform .2s;
+        }}
+        .btn:hover {{ opacity: .85; transform: translateY(-2px); }}
+        .btn-linux {{ background: linear-gradient(135deg, #a6e3a1, #40a02b); color: #11111b; }}
+        .btn-win   {{ background: linear-gradient(135deg, #89b4fa, #1e66f5); color: #fff; }}
+        .no-dl {{ color: #6c7086; font-style: italic; }}
+        .github-link {{
+            margin-top: 20px;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: #89b4fa;
+            text-decoration: none;
+            font-size: .95rem;
+            border: 1px solid #313244;
+            border-radius: 8px;
+            padding: 10px 20px;
+            transition: border-color .2s, background .2s;
+        }}
+        .github-link:hover {{ border-color: #89b4fa; background: #1e1e2e; }}
+        .version-badge {{
+            margin-top: 32px;
+            background: #1e1e2e;
+            border: 1px solid #313244;
+            border-radius: 10px;
+            padding: 14px 24px;
+            font-size: .9rem;
+            color: #a6adc8;
+            max-width: 560px;
+            text-align: left;
+        }}
+        .version-badge b {{ color: #a6e3a1; }}
+        footer {{
+            margin-top: 56px;
+            font-size: .8rem;
+            color: #45475a;
+        }}
+        footer a {{ color: #6c7086; }}
+    </style>
+</head>
+<body>
+    <div class="hero">
+        <div class="logo">🎮</div>
+        <h1>Fiksiarski Game Hub</h1>
+        <p class="subtitle">
+            Centrum gier online dla znajomych — zagraj w szachy, wojnę,<br>
+            chińczyka, statki i więcej, wszystko w jednym miejscu!
+        </p>
+
+        <div class="badges">
+            <span class="badge">🌐 Online multiplayer</span>
+            <span class="badge">🏆 Tabela wyników</span>
+            <span class="badge">🔄 Auto-aktualizacje</span>
+            <span class="badge">🐧 Linux & 🪟 Windows</span>
+        </div>
+
+        <div class="cards">
+            <div class="card"><div class="icon">♟</div><div class="name">Szachy</div></div>
+            <div class="card"><div class="icon">⚔</div><div class="name">Wojna</div></div>
+            <div class="card"><div class="icon">🎲</div><div class="name">Chińczyk</div></div>
+            <div class="card"><div class="icon">🚢</div><div class="name">Statki</div></div>
+            <div class="card"><div class="icon">🃏</div><div class="name">Pasjans</div></div>
+            <div class="card"><div class="icon">🎰</div><div class="name">Blackjack</div></div>
+        </div>
+
+        <div class="version-badge">
+            <b>Aktualna wersja:</b> v{ver_info['version']}<br>
+            <span style="margin-top:4px;display:block;">{ver_info['changelog']}</span>
+        </div>
+
+        <div class="dl-section">
+            {dl_buttons}
+        </div>
+
+        <div style="margin-top:24px;">
+            <a class="github-link" href="https://github.com/szymona/fiksiarski-game-hub" target="_blank" rel="noopener">
+                <svg height="20" viewBox="0 0 16 16" width="20" fill="currentColor">
+                    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+                </svg>
+                Zobacz projekt na GitHub
+            </a>
+        </div>
+    </div>
+
+    <footer>
+        &copy; 2025 Fiksiarski Game Hub &nbsp;|&nbsp;
+        <a href="/admin">Panel Admina</a>
+    </footer>
+</body>
+</html>"""
 
 
 @app.post("/api/register")
@@ -481,6 +692,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
 
     await _broadcast_room_state(room_id, exclude_slot=free_slot)
 
+    keepalive_task = asyncio.create_task(_keepalive(websocket))
     try:
         while True:
             data = await websocket.receive_text()
@@ -491,7 +703,8 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 allowed_types = {"ChessMove", "LudoRoll", "LudoMove", "WarStep",
                                "BattleshipFleet", "BattleshipShot",
                                "ResetRequest", "ResetApproved", "ResetDeclined",
-                               "StateRequest", "GameState", "FocusGame"}
+                               "StateRequest", "GameState", "FocusGame",
+                               "SetNick", "Pong"}
                 if parsed["type"] not in allowed_types:
                     continue
             except (json.JSONDecodeError, KeyError):
@@ -501,6 +714,21 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 continue
             seat = room_order[room_id].index(free_slot)
             event_type = parsed["type"]
+
+            # --- Nick obsługa ---
+            if event_type == "SetNick":
+                nick = str(parsed.get("nick", f"Gracz{free_slot + 1}"))[:32]
+                room_nicks[room_id][free_slot] = nick
+                await _broadcast_json(room_id, {
+                    "type": "PeerNick",
+                    "slot": free_slot,
+                    "nick": nick,
+                }, exclude_slot=free_slot)
+                continue
+
+            # --- Odpowiedź na Ping (keepalive) ---
+            if event_type == "Pong":
+                continue
 
             if event_type == "FocusGame":
                 game = str(parsed.get("game", ""))
@@ -609,8 +837,11 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
     except WebSocketDisconnect:
         pass
     finally:
+        keepalive_task.cancel()
         if room_id in rooms and free_slot in rooms[room_id]:
             del rooms[room_id][free_slot]
+        if room_id in room_nicks and free_slot in room_nicks[room_id]:
+            del room_nicks[room_id][free_slot]
         if room_id in room_order and free_slot in room_order[room_id]:
             room_focus[room_id] = _focus_list(room_id)
             focus_idx = room_order[room_id].index(free_slot)

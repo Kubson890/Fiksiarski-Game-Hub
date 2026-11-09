@@ -720,10 +720,10 @@ impl BattleshipGame {
         );
         let ui = &mut child_ui;
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if !self.online_mode {
                 if ui
-                    .button(egui::RichText::new("🔄 Nowa bitwa morska").size(16.0))
+                    .button(egui::RichText::new("🔄 Nowa bitwa").size(15.0))
                     .clicked()
                 {
                     audio.play(Sfx::Click);
@@ -734,18 +734,20 @@ impl BattleshipGame {
 
             if self.phase == Phase::Placement {
                 if ui
-                    .button(egui::RichText::new("🔃 Obróć okręt (R / PPM)").size(16.0))
+                    .button(egui::RichText::new("🔃 Obróć (R)").size(15.0))
                     .clicked()
                 {
                     audio.play(Sfx::Click);
                     self.place_horizontal = !self.place_horizontal;
                 }
 
-                let can_random = (!self.online_mode || self.bot_ships.is_empty())
-                    && !self.waiting;
+                let can_random =
+                    (!self.online_mode || self.bot_ships.is_empty()) && !self.waiting;
                 let rand_btn = ui.add_enabled(
                     can_random,
-                    egui::Button::new(egui::RichText::new("🎲 Losuj układ floty i graj!").size(16.0)),
+                    egui::Button::new(
+                        egui::RichText::new("🎲 Losuj układ i graj!").size(15.0),
+                    ),
                 );
                 if rand_btn.clicked() {
                     audio.play(Sfx::CardSlide);
@@ -767,7 +769,7 @@ impl BattleshipGame {
                         };
                     } else {
                         self.status_text =
-                            "🎯 Flota gotowa! Kliknij na Radar Wroga (po prawej), aby oddać salwę!"
+                            "🎯 Flota gotowa! Kliknij na Radar Wroga, aby oddać salwę!"
                                 .to_string();
                     }
                 }
@@ -776,45 +778,71 @@ impl BattleshipGame {
             ui.separator();
             ui.label(
                 egui::RichText::new(&self.status_text)
-                    .size(18.0)
+                    .size(16.5)
                     .strong()
                     .color(egui::Color32::from_rgb(135, 225, 255)),
             );
             if self.spectators > 0 {
                 ui.separator();
-                let text = if self.spectators == 1 {
-                    "👁 1 osoba obserwuje grę".to_string()
-                } else {
-                    format!("👁 {} osoby obserwują grę", self.spectators)
-                };
                 ui.label(
-                    egui::RichText::new(text)
-                        .size(15.0)
+                    egui::RichText::new(format!("👁 {}", self.spectators))
+                        .size(14.5)
                         .strong()
                         .color(egui::Color32::GOLD),
                 );
             }
         });
 
-        ui.add_space(12.0);
+        ui.add_space(10.0);
 
         let work_rect = ui.available_rect_before_wrap();
-        let gap = (work_rect.width() * 0.04).clamp(20.0, 56.0);
-        let max_board_w = ((work_rect.width() - gap) / 2.0).max(220.0);
-        let max_board_h = (work_rect.height() - 42.0).max(220.0);
-        let board_px = max_board_w.min(max_board_h);
-        let cell = board_px / 10.0;
+        let is_portrait = work_rect.height() > work_rect.width() || work_rect.width() < 680.0;
 
-        let total_w = board_px * 2.0 + gap;
-        let start_x = work_rect.left() + ((work_rect.width() - total_w) / 2.0).max(0.0);
-        let start_y = work_rect.top() + 32.0 + ((work_rect.height() - 32.0 - board_px) / 2.0).max(0.0);
+        let (left_board, right_board, cell) = if is_portrait {
+            let v_gap = 34.0;
+            let max_board_h = ((work_rect.height() - v_gap - 30.0) / 2.0).max(150.0);
+            let board_px = (work_rect.width() - 12.0).min(max_board_h).max(150.0);
+            let c = board_px / 10.0;
+            let x = work_rect.center().x - board_px * 0.5;
+            let top_y = work_rect.top() + 22.0;
 
-        let left_board =
-            egui::Rect::from_min_size(egui::pos2(start_x, start_y), egui::vec2(board_px, board_px));
-        let right_board = egui::Rect::from_min_size(
-            egui::pos2(start_x + board_px + gap, start_y),
-            egui::vec2(board_px, board_px),
-        );
+            let top_rect =
+                egui::Rect::from_min_size(egui::pos2(x, top_y), egui::vec2(board_px, board_px));
+            let bottom_rect = egui::Rect::from_min_size(
+                egui::pos2(x, top_y + board_px + v_gap),
+                egui::vec2(board_px, board_px),
+            );
+
+            // W pionie podczas bitwy Radar Wroga jest na górze (łatwiej celować kciukiem),
+            // a podczas ustawiania okrętów Twoja Flota jest na górze:
+            if self.phase == Phase::Placement {
+                (top_rect, bottom_rect, c)
+            } else {
+                (bottom_rect, top_rect, c)
+            }
+        } else {
+            let gap = (work_rect.width() * 0.04).clamp(20.0, 56.0);
+            let max_board_w = ((work_rect.width() - gap) / 2.0).max(200.0);
+            let max_board_h = (work_rect.height() - 42.0).max(200.0);
+            let board_px = max_board_w.min(max_board_h);
+            let c = board_px / 10.0;
+
+            let total_w = board_px * 2.0 + gap;
+            let start_x = work_rect.left() + ((work_rect.width() - total_w) / 2.0).max(0.0);
+            let start_y = work_rect.top()
+                + 32.0
+                + ((work_rect.height() - 32.0 - board_px) / 2.0).max(0.0);
+
+            let l_rect = egui::Rect::from_min_size(
+                egui::pos2(start_x, start_y),
+                egui::vec2(board_px, board_px),
+            );
+            let r_rect = egui::Rect::from_min_size(
+                egui::pos2(start_x + board_px + gap, start_y),
+                egui::vec2(board_px, board_px),
+            );
+            (l_rect, r_rect, c)
+        };
 
         let p_alive = self
             .player_ships
@@ -828,18 +856,18 @@ impl BattleshipGame {
             .count();
 
         ui.painter().text(
-            egui::pos2(left_board.center().x, left_board.top() - 16.0),
+            egui::pos2(left_board.center().x, left_board.top() - 14.0),
             egui::Align2::CENTER_CENTER,
-            format!("🛡 TWOJA FLOTA (Okręty: {}/5)", p_alive),
-            egui::FontId::proportional(19.0),
+            format!("🛡 TWOJA FLOTA ({}/5)", p_alive),
+            egui::FontId::proportional(16.5),
             egui::Color32::WHITE,
         );
 
         ui.painter().text(
-            egui::pos2(right_board.center().x, right_board.top() - 16.0),
+            egui::pos2(right_board.center().x, right_board.top() - 14.0),
             egui::Align2::CENTER_CENTER,
-            format!("📡 RADAR WROGA (Pozostało: {}/5)", b_alive),
-            egui::FontId::proportional(19.0),
+            format!("📡 RADAR WROGA ({}/5)", b_alive),
+            egui::FontId::proportional(16.5),
             egui::Color32::from_rgb(255, 195, 110),
         );
 
@@ -919,12 +947,12 @@ impl BattleshipGame {
                                 };
                             } else {
                                 self.status_text =
-                                    "🎯 Wszystkie okręty na pozycjach! Strzelaj w Radar Wroga po prawej!"
+                                    "🎯 Wszystkie okręty na pozycjach! Strzelaj w Radar Wroga!"
                                         .to_string();
                             }
                         } else {
                             self.status_text = format!(
-                                "Ustaw swój okręt: {} (PPM lub klawisz R obraca)",
+                                "Ustaw swój okręt: {} (Obróć przyciskiem u góry)",
                                 FLEET_SIZES[self.placing_idx].1
                             );
                         }
@@ -1026,7 +1054,6 @@ impl BattleshipGame {
         }
     }
 
-    /// Widok dla miejsc 3/4 — obie plansze, bez możliwości strzelania.
     fn spectator_ui(&mut self, ui: &mut egui::Ui) {
         let full_rect = ui.available_rect_before_wrap();
         ui.painter()
@@ -1042,77 +1069,62 @@ impl BattleshipGame {
         );
         let ui = &mut child_ui;
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(
-                egui::RichText::new("👁 Tryb obserwatora — nie możesz strzelać")
-                    .size(19.0)
+                egui::RichText::new("👁 Tryb obserwatora")
+                    .size(17.0)
                     .strong()
                     .color(egui::Color32::GOLD),
             );
-            if self.spectators > 0 {
-                ui.separator();
-                let text = if self.spectators == 1 {
-                    "👁 1 osoba obserwuje grę".to_string()
-                } else {
-                    format!("👁 {} osoby obserwują grę", self.spectators)
-                };
-                ui.label(
-                    egui::RichText::new(text)
-                        .size(15.0)
-                        .color(egui::Color32::GOLD),
-                );
-            }
             ui.separator();
             ui.label(
                 egui::RichText::new(&self.status_text)
-                    .size(16.0)
+                    .size(15.5)
                     .strong()
                     .color(egui::Color32::from_rgb(135, 225, 255)),
             );
         });
 
-        if !self.state_ready {
-            ui.add_space(24.0);
-            ui.label(
-                egui::RichText::new("⏳ Czekam na przesłanie stanu plansz od graczy...")
-                    .size(18.0)
-                    .color(egui::Color32::GOLD),
-            );
-        }
-
-        ui.add_space(8.0);
-        if self.phase == Phase::Battle {
-            ui.label(
-                egui::RichText::new(format!(
-                    "🎯 Tura: Gracz {}",
-                    self.spectator_turn + 1
-                ))
-                .size(17.0)
-                .strong()
-                .color(egui::Color32::from_rgb(255, 195, 110)),
-            );
-        }
-
         let work_rect = ui.available_rect_before_wrap();
-        let gap = (work_rect.width() * 0.04).clamp(20.0, 56.0);
-        let max_board_w = ((work_rect.width() - gap) / 2.0).max(220.0);
-        let max_board_h = (work_rect.height() - 70.0).max(220.0);
-        let board_px = max_board_w.min(max_board_h);
-        let cell = board_px / 10.0;
+        let is_portrait = work_rect.height() > work_rect.width() || work_rect.width() < 680.0;
 
-        let total_w = board_px * 2.0 + gap;
-        let start_x = work_rect.left() + ((work_rect.width() - total_w) / 2.0).max(0.0);
-        let start_y =
-            work_rect.top() + 8.0 + ((work_rect.height() - board_px) / 2.0).max(0.0);
+        let (left_board, right_board, cell) = if is_portrait {
+            let v_gap = 34.0;
+            let max_board_h = ((work_rect.height() - v_gap - 30.0) / 2.0).max(150.0);
+            let board_px = (work_rect.width() - 12.0).min(max_board_h).max(150.0);
+            let c = board_px / 10.0;
+            let x = work_rect.center().x - board_px * 0.5;
+            let top_y = work_rect.top() + 22.0;
 
-        let left_board = egui::Rect::from_min_size(
-            egui::pos2(start_x, start_y),
-            egui::vec2(board_px, board_px),
-        );
-        let right_board = egui::Rect::from_min_size(
-            egui::pos2(start_x + board_px + gap, start_y),
-            egui::vec2(board_px, board_px),
-        );
+            let l_rect =
+                egui::Rect::from_min_size(egui::pos2(x, top_y), egui::vec2(board_px, board_px));
+            let r_rect = egui::Rect::from_min_size(
+                egui::pos2(x, top_y + board_px + v_gap),
+                egui::vec2(board_px, board_px),
+            );
+            (l_rect, r_rect, c)
+        } else {
+            let gap = (work_rect.width() * 0.04).clamp(20.0, 56.0);
+            let max_board_w = ((work_rect.width() - gap) / 2.0).max(200.0);
+            let max_board_h = (work_rect.height() - 60.0).max(200.0);
+            let board_px = max_board_w.min(max_board_h);
+            let c = board_px / 10.0;
+
+            let total_w = board_px * 2.0 + gap;
+            let start_x = work_rect.left() + ((work_rect.width() - total_w) / 2.0).max(0.0);
+            let start_y =
+                work_rect.top() + 24.0 + ((work_rect.height() - 24.0 - board_px) / 2.0).max(0.0);
+
+            let l_rect = egui::Rect::from_min_size(
+                egui::pos2(start_x, start_y),
+                egui::vec2(board_px, board_px),
+            );
+            let r_rect = egui::Rect::from_min_size(
+                egui::pos2(start_x + board_px + gap, start_y),
+                egui::vec2(board_px, board_px),
+            );
+            (l_rect, r_rect, c)
+        };
 
         let p_alive = self
             .player_ships
@@ -1126,17 +1138,17 @@ impl BattleshipGame {
             .count();
 
         ui.painter().text(
-            egui::pos2(left_board.center().x, left_board.top() - 18.0),
+            egui::pos2(left_board.center().x, left_board.top() - 14.0),
             egui::Align2::CENTER_CENTER,
-            format!("🟦 GRACZ 1 (Okręty: {}/5)", p_alive),
-            egui::FontId::proportional(19.0),
+            format!("🟦 GRACZ 1 ({}/5)", p_alive),
+            egui::FontId::proportional(16.5),
             egui::Color32::WHITE,
         );
         ui.painter().text(
-            egui::pos2(right_board.center().x, right_board.top() - 18.0),
+            egui::pos2(right_board.center().x, right_board.top() - 14.0),
             egui::Align2::CENTER_CENTER,
-            format!("🟥 GRACZ 2 (Okręty: {}/5)", b_alive),
-            egui::FontId::proportional(19.0),
+            format!("🟥 GRACZ 2 ({}/5)", b_alive),
+            egui::FontId::proportional(16.5),
             egui::Color32::WHITE,
         );
 
@@ -1175,14 +1187,6 @@ impl BattleshipGame {
             cell,
             &self.player_shots,
             &self.bot_ships,
-        );
-
-        ui.painter().text(
-            egui::pos2(full_rect.center().x, full_rect.bottom() - 12.0),
-            egui::Align2::CENTER_CENTER,
-            "👁 Obserwator widzi obie floty — gracze widzą tylko własną planszę i radar.",
-            egui::FontId::proportional(13.0),
-            egui::Color32::from_rgb(150, 170, 190),
         );
     }
 

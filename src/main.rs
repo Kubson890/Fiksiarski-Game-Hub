@@ -18,7 +18,6 @@ use net::{NetClient, NetEvent};
 fn setup_custom_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
-    // Wbudowujemy pełny zestaw ikon NotoEmoji bezpośrednio w binarkę
     fonts.font_data.insert(
         "noto_emoji_full".to_owned(),
         egui::FontData::from_static(include_bytes!("../assets/NotoEmoji.ttf")),
@@ -38,7 +37,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 780.0])
-            .with_min_inner_size([880.0, 620.0])
+            // Pozwalamy zwęzić okno na PC do rozmiarów ekranu telefonu (np. 360x640):
+            .with_min_inner_size([340.0, 560.0])
             .with_title("Fiksiarski Game Hub"),
         ..Default::default()
     };
@@ -47,7 +47,6 @@ fn main() -> eframe::Result<()> {
         "Fiksiarski Game Hub",
         options,
         Box::new(|cc| {
-            // Ładowanie fontu z emotkami:
             setup_custom_fonts(&cc.egui_ctx);
 
             let mut style = (*cc.egui_ctx.style()).clone();
@@ -307,7 +306,6 @@ impl GameHubApp {
     }
 
     fn apply_game_state(&mut self, game: &str, pair: usize, state: &serde_json::Value) {
-        // Tunelowanie synchronizacji Państwa-Miasta
         if state.get("cat_sync").and_then(|v| v.as_bool()) == Some(true) {
             self.categories.apply_state_json(state, &self.audio);
             return;
@@ -546,6 +544,8 @@ impl eframe::App for GameHubApp {
                     } => {
                         self.apply_game_state(&game, pair, &state);
                     }
+                    // Obsługa nowych wariantów – już przetworzone w poll_events
+                    NetEvent::Ping | NetEvent::PeerNick { .. } => {}
                 }
             }
 
@@ -655,16 +655,17 @@ impl eframe::App for GameHubApp {
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.add_space(6.0);
             let bar_width = ui.available_width();
-            let scale = (bar_width / 1500.0).clamp(0.64, 1.0);
-            let narrow = scale < 0.82;
-            let fs_title = 20.0 * scale;
-            let fs_btn = 15.0 * scale;
-            let fs_info = 14.0 * scale;
-            let fs_small = 13.0 * scale;
+            let scale = (bar_width / 1400.0).clamp(0.72, 1.0);
+            let narrow = bar_width < 860.0;
+            let fs_title = 19.0 * scale;
+            let fs_btn = 14.5 * scale;
+            let fs_info = 13.5 * scale;
+            let fs_small = 12.5 * scale;
 
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = (8.0 * scale).max(3.0);
-                ui.spacing_mut().button_padding = egui::vec2(6.0 * scale, 3.0 * scale);
+                ui.spacing_mut().item_spacing.x = (8.0 * scale).max(4.0);
+                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.spacing_mut().button_padding = egui::vec2(8.0 * scale, 4.5 * scale);
 
                 ui.heading(
                     egui::RichText::new(if narrow {
@@ -704,7 +705,7 @@ impl eframe::App for GameHubApp {
                 ) {
                     ui.separator();
                     if ui
-                        .button(egui::RichText::new("⬅ Menu Gier").size(fs_btn))
+                        .button(egui::RichText::new("⬅ Menu").size(fs_btn))
                         .clicked()
                     {
                         self.audio.play(Sfx::Click);
@@ -871,7 +872,7 @@ impl eframe::App for GameHubApp {
                             ui.separator();
                             ui.label(
                                 egui::RichText::new(if narrow {
-                                    "⏳ Czekam na zgodę..."
+                                    "⏳ Czekam..."
                                 } else {
                                     "⏳ Czekanie na zgodę..."
                                 })
@@ -984,7 +985,7 @@ impl eframe::App for GameHubApp {
                         }
                     } else {
                         ui.label(
-                            egui::RichText::new("🕹 Tryb Offline")
+                            egui::RichText::new("🕹 Offline")
                                 .size(fs_info)
                                 .color(egui::Color32::LIGHT_GRAY),
                         );
@@ -1078,458 +1079,493 @@ impl eframe::App for GameHubApp {
 impl GameHubApp {
     fn render_login(&mut self, ui: &mut egui::Ui) {
         let avail = ui.available_size();
-        ui.vertical_centered(|ui| {
-            ui.add_space((avail.y * 0.16).max(30.0));
+        let card_width = (avail.x - 32.0).clamp(280.0, 410.0);
+        let btn_w = (card_width - 48.0).max(220.0);
 
-            egui::Frame::none()
-                .fill(egui::Color32::from_rgb(32, 36, 46))
-                .rounding(16.0)
-                .inner_margin(32.0)
-                .stroke(egui::Stroke::new(
-                    1.5_f32,
-                    egui::Color32::from_rgb(70, 80, 105),
-                ))
-                .show(ui, |ui| {
-                    ui.set_width(410.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space((avail.y * 0.10).max(16.0));
 
-                    if self.net.has_saved_account && !self.net.show_account_form {
-                        ui.heading(
-                            egui::RichText::new(format!(
-                                "👋 Witaj ponownie, {}!",
-                                self.net.username_input
-                            ))
-                            .size(27.0)
-                            .strong()
-                            .color(egui::Color32::WHITE),
-                        );
-                        ui.add_space(8.0);
-                        ui.label("Wybierz w jakim trybie chcesz dzisiaj grać:");
-                        ui.add_space(22.0);
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgb(32, 36, 46))
+                        .rounding(16.0)
+                        .inner_margin(24.0)
+                        .stroke(egui::Stroke::new(
+                            1.5_f32,
+                            egui::Color32::from_rgb(70, 80, 105),
+                        ))
+                        .show(ui, |ui| {
+                            ui.set_width(card_width);
 
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new(
-                                        "🌐 Graj Online (Wybierz Pokój, Rankingi)",
+                            if self.net.has_saved_account && !self.net.show_account_form {
+                                ui.heading(
+                                    egui::RichText::new(format!(
+                                        "👋 Witaj ponownie, {}!",
+                                        self.net.username_input
+                                    ))
+                                    .size(24.0)
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                                );
+                                ui.add_space(8.0);
+                                ui.label("Wybierz w jakim trybie chcesz dzisiaj grać:");
+                                ui.add_space(20.0);
+
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new(
+                                                "🌐 Graj Online (Wybierz Pokój, Rankingi)",
+                                            )
+                                            .size(16.0)
+                                            .strong(),
+                                        )
+                                        .min_size(egui::vec2(btn_w, 48.0)),
                                     )
-                                    .size(17.0)
-                                    .strong(),
-                                )
-                                .min_size(egui::vec2(360.0, 48.0)),
-                            )
-                            .clicked()
-                        {
-                            self.audio.play(Sfx::Click);
-                            if self.net.login_or_register(false) {
-                                if let Some(u) = &self.net.current_user {
-                                    self.blackjack.set_chips(u.chips);
-                                    self.last_synced_chips = u.chips;
-                                }
-                                self.is_online_session = true;
-                                self.net.fetch_rooms();
-                                self.current_screen = Screen::RoomSelect;
-                            }
-                        }
-
-                        ui.add_space(12.0);
-
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("🕹 Graj Offline (Lokalnie z Botami)")
-                                        .size(17.0),
-                                )
-                                .min_size(egui::vec2(360.0, 46.0)),
-                            )
-                            .clicked()
-                        {
-                            self.audio.play(Sfx::Click);
-                            self.is_online_session = false;
-                            self.net.current_user = None;
-                            self.net.check_for_updates();
-                            self.current_screen = Screen::Hub;
-                        }
-
-                        if !self.net.auth_error.is_empty() {
-                            ui.add_space(12.0);
-                            ui.label(
-                                egui::RichText::new(&self.net.auth_error)
-                                    .color(egui::Color32::from_rgb(255, 95, 95)),
-                            );
-                        }
-
-                        ui.add_space(18.0);
-                        ui.separator();
-                        ui.add_space(8.0);
-
-                        if ui
-                            .button(
-                                egui::RichText::new("🔄 Zmień konto / adres serwera")
-                                    .size(14.0)
-                                    .color(egui::Color32::LIGHT_GRAY),
-                            )
-                            .clicked()
-                        {
-                            self.audio.play(Sfx::Click);
-                            self.net.show_account_form = true;
-                        }
-                    } else {
-                        ui.heading(
-                            egui::RichText::new("🔐 Konto Gracza")
-                                .size(28.0)
-                                .strong()
-                                .color(egui::Color32::WHITE),
-                        );
-                        ui.add_space(6.0);
-                        ui.label("Zaloguj się lub utwórz konto (zostanie zapamiętane)");
-                        ui.add_space(18.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label("🌐 Serwer:");
-                            ui.text_edit_singleline(&mut self.net.server_url);
-                        });
-                        ui.add_space(8.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label("👤 Login:  ");
-                            ui.text_edit_singleline(&mut self.net.username_input);
-                        });
-                        ui.add_space(8.0);
-
-                        ui.horizontal(|ui| {
-                            ui.label("🔑 Hasło:  ");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.net.password_input)
-                                    .password(true),
-                            );
-                        });
-
-                        if !self.net.auth_error.is_empty() {
-                            ui.add_space(10.0);
-                            ui.label(
-                                egui::RichText::new(&self.net.auth_error)
-                                    .color(egui::Color32::from_rgb(255, 95, 95)),
-                            );
-                        }
-
-                        ui.add_space(20.0);
-
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new("🚀 Zaloguj się").size(17.0).strong(),
-                                    )
-                                    .min_size(egui::vec2(175.0, 42.0)),
-                                )
-                                .clicked()
-                            {
-                                self.audio.play(Sfx::Click);
-                                if self.net.login_or_register(false) {
-                                    if let Some(u) = &self.net.current_user {
-                                        self.blackjack.set_chips(u.chips);
-                                        self.last_synced_chips = u.chips;
+                                    .clicked()
+                                {
+                                    self.audio.play(Sfx::Click);
+                                    if self.net.login_or_register(false) {
+                                        if let Some(u) = &self.net.current_user {
+                                            self.blackjack.set_chips(u.chips);
+                                            self.last_synced_chips = u.chips;
+                                        }
+                                        self.is_online_session = true;
+                                        self.net.fetch_rooms();
+                                        self.current_screen = Screen::RoomSelect;
                                     }
-                                    self.is_online_session = true;
-                                    self.net.fetch_rooms();
-                                    self.current_screen = Screen::RoomSelect;
                                 }
-                            }
 
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new("✨ Załóż konto").size(17.0),
+                                ui.add_space(12.0);
+
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new(
+                                                "🕹 Graj Offline (Lokalnie z Botami)",
+                                            )
+                                            .size(16.0),
+                                        )
+                                        .min_size(egui::vec2(btn_w, 46.0)),
                                     )
-                                    .min_size(egui::vec2(175.0, 42.0)),
-                                )
-                                .clicked()
-                            {
-                                self.audio.play(Sfx::Click);
-                                if self.net.login_or_register(true) {
-                                    if let Some(u) = &self.net.current_user {
-                                        self.blackjack.set_chips(u.chips);
-                                        self.last_synced_chips = u.chips;
+                                    .clicked()
+                                {
+                                    self.audio.play(Sfx::Click);
+                                    self.is_online_session = false;
+                                    self.net.current_user = None;
+                                    self.net.check_for_updates();
+                                    self.current_screen = Screen::Hub;
+                                }
+
+                                if !self.net.auth_error.is_empty() {
+                                    ui.add_space(12.0);
+                                    ui.label(
+                                        egui::RichText::new(&self.net.auth_error)
+                                            .color(egui::Color32::from_rgb(255, 95, 95)),
+                                    );
+                                }
+
+                                ui.add_space(18.0);
+                                ui.separator();
+                                ui.add_space(8.0);
+
+                                if ui
+                                    .button(
+                                        egui::RichText::new("🔄 Zmień konto / adres serwera")
+                                            .size(14.0)
+                                            .color(egui::Color32::LIGHT_GRAY),
+                                    )
+                                    .clicked()
+                                {
+                                    self.audio.play(Sfx::Click);
+                                    self.net.show_account_form = true;
+                                }
+                            } else {
+                                ui.heading(
+                                    egui::RichText::new("🔐 Konto Gracza")
+                                        .size(25.0)
+                                        .strong()
+                                        .color(egui::Color32::WHITE),
+                                );
+                                ui.add_space(6.0);
+                                ui.label("Zaloguj się lub utwórz konto (zostanie zapamiętane)");
+                                ui.add_space(16.0);
+
+                                ui.horizontal(|ui| {
+                                    ui.label("🌐 Serwer:");
+                                    ui.text_edit_singleline(&mut self.net.server_url);
+                                });
+                                ui.add_space(8.0);
+
+                                ui.horizontal(|ui| {
+                                    ui.label("👤 Login:  ");
+                                    ui.text_edit_singleline(&mut self.net.username_input);
+                                });
+                                ui.add_space(8.0);
+
+                                ui.horizontal(|ui| {
+                                    ui.label("🔑 Hasło:  ");
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.net.password_input)
+                                            .password(true),
+                                    );
+                                });
+
+                                if !self.net.auth_error.is_empty() {
+                                    ui.add_space(10.0);
+                                    ui.label(
+                                        egui::RichText::new(&self.net.auth_error)
+                                            .color(egui::Color32::from_rgb(255, 95, 95)),
+                                    );
+                                }
+
+                                ui.add_space(18.0);
+
+                                let half_btn = ((btn_w - 10.0) / 2.0).max(110.0);
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new("🚀 Zaloguj")
+                                                    .size(16.0)
+                                                    .strong(),
+                                            )
+                                            .min_size(egui::vec2(half_btn, 42.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.audio.play(Sfx::Click);
+                                        if self.net.login_or_register(false) {
+                                            if let Some(u) = &self.net.current_user {
+                                                self.blackjack.set_chips(u.chips);
+                                                self.last_synced_chips = u.chips;
+                                            }
+                                            self.is_online_session = true;
+                                            self.net.fetch_rooms();
+                                            self.current_screen = Screen::RoomSelect;
+                                        }
                                     }
-                                    self.is_online_session = true;
-                                    self.net.fetch_rooms();
-                                    self.current_screen = Screen::RoomSelect;
+
+                                    if ui
+                                        .add(
+                                            egui::Button::new(
+                                                egui::RichText::new("✨ Załóż konto").size(16.0),
+                                            )
+                                            .min_size(egui::vec2(half_btn, 42.0)),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.audio.play(Sfx::Click);
+                                        if self.net.login_or_register(true) {
+                                            if let Some(u) = &self.net.current_user {
+                                                self.blackjack.set_chips(u.chips);
+                                                self.last_synced_chips = u.chips;
+                                            }
+                                            self.is_online_session = true;
+                                            self.net.fetch_rooms();
+                                            self.current_screen = Screen::RoomSelect;
+                                        }
+                                    }
+                                });
+
+                                ui.add_space(14.0);
+                                ui.separator();
+                                ui.add_space(8.0);
+
+                                if ui
+                                    .button(
+                                        egui::RichText::new("🕹 Graj Offline jako Gość")
+                                            .size(14.0)
+                                            .color(egui::Color32::LIGHT_GRAY),
+                                    )
+                                    .clicked()
+                                {
+                                    self.audio.play(Sfx::Click);
+                                    self.is_online_session = false;
+                                    self.net.current_user = None;
+                                    self.net.check_for_updates();
+                                    self.current_screen = Screen::Hub;
                                 }
                             }
                         });
-
-                        ui.add_space(14.0);
-                        ui.separator();
-                        ui.add_space(8.0);
-
-                        if ui
-                            .button(
-                                egui::RichText::new("🕹 Graj Offline jako Gość (bez serwera)")
-                                    .size(14.0)
-                                    .color(egui::Color32::LIGHT_GRAY),
-                            )
-                            .clicked()
-                        {
-                            self.audio.play(Sfx::Click);
-                            self.is_online_session = false;
-                            self.net.current_user = None;
-                            self.net.check_for_updates();
-                            self.current_screen = Screen::Hub;
-                        }
-                    }
                 });
-        });
+            });
     }
 
     fn render_room_select(&mut self, ui: &mut egui::Ui) {
         let avail = ui.available_size();
+        let is_portrait = avail.y > avail.x || avail.x < 680.0;
         let ui_scale = (avail.x / 1100.0).min(avail.y / 720.0).clamp(0.75, 1.3);
 
-        ui.vertical_centered(|ui| {
-            ui.add_space((avail.y * 0.12).max(20.0));
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space((avail.y * 0.08).max(16.0));
 
-            ui.heading(
-                egui::RichText::new("🌐 Wybierz Pokój Multiplayer")
-                    .size((32.0 * ui_scale).clamp(22.0, 38.0))
-                    .strong()
-                    .color(egui::Color32::WHITE),
-            );
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new(
-                    "Kliknij na wybrany pokój, aby usiąść przy stole i przejść do gier:",
-                )
-                .size((16.0 * ui_scale).clamp(13.0, 20.0))
-                .color(egui::Color32::LIGHT_GRAY),
-            );
-            ui.add_space(14.0);
-
-            if ui
-                .button(egui::RichText::new("🔄 Odśwież stan pokoi").size(15.0))
-                .clicked()
-            {
-                self.audio.play(Sfx::Click);
-                self.net.fetch_rooms();
-            }
-
-            ui.add_space(22.0);
-
-            let spacing = (avail.x * 0.03).clamp(16.0, 36.0);
-            let card_w = ((avail.x * 0.82 - spacing) / 2.0).clamp(240.0, 420.0);
-            let card_h = (avail.y * 0.30).clamp(140.0, 220.0);
-            let total_w = card_w * 2.0 + spacing;
-            let left_pad = ((avail.x - total_w) / 2.0).max(0.0);
-
-            let rooms_snapshot = self.net.available_rooms.clone();
-            let mut chosen_room: Option<String> = None;
-
-            ui.horizontal(|ui| {
-                ui.add_space(left_pad);
-
-                for (idx, r) in rooms_snapshot.iter().enumerate() {
-                    let is_full = r.players >= r.max_players;
-                    let title = format!("🎲 Pokój #{} ({})", idx + 1, r.room_id);
-                    let subtitle = if is_full {
-                        format!("⛔ PEŁNY ({}/{} os.)", r.players, r.max_players)
-                    } else if r.players == 0 {
-                        format!("🟢 Wolny ({}/{} os.)", r.players, r.max_players)
-                    } else {
-                        format!("🔥 W pokoju: {}/{} os.", r.players, r.max_players)
-                    };
-
-                    let resp = Self::game_card(
-                        ui,
-                        egui::vec2(card_w, card_h),
-                        &title,
-                        &subtitle,
-                        0,
-                        true,
+                    ui.heading(
+                        egui::RichText::new("🌐 Wybierz Pokój Multiplayer")
+                            .size((30.0 * ui_scale).clamp(20.0, 36.0))
+                            .strong()
+                            .color(egui::Color32::WHITE),
                     );
-                    if resp.clicked() && !is_full {
-                        chosen_room = Some(r.room_id.clone());
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "Kliknij na wybrany pokój, aby usiąść przy stole i przejść do gier:",
+                        )
+                        .size((15.5 * ui_scale).clamp(12.5, 19.0))
+                        .color(egui::Color32::LIGHT_GRAY),
+                    );
+                    ui.add_space(12.0);
+
+                    if ui
+                        .button(egui::RichText::new("🔄 Odśwież stan pokoi").size(15.0))
+                        .clicked()
+                    {
+                        self.audio.play(Sfx::Click);
+                        self.net.fetch_rooms();
                     }
-                    if idx == 0 {
-                        ui.add_space(spacing);
+
+                    ui.add_space(20.0);
+
+                    let rooms_snapshot = self.net.available_rooms.clone();
+                    let mut chosen_room: Option<String> = None;
+
+                    if is_portrait {
+                        let card_w = (avail.x * 0.88).clamp(240.0, 420.0);
+                        let card_h = 135.0;
+                        for (idx, r) in rooms_snapshot.iter().enumerate() {
+                            let is_full = r.players >= r.max_players;
+                            let title = format!("🎲 Pokój #{} ({})", idx + 1, r.room_id);
+                            let subtitle = if is_full {
+                                format!("⛔ PEŁNY ({}/{} os.)", r.players, r.max_players)
+                            } else if r.players == 0 {
+                                format!("🟢 Wolny ({}/{} os.)", r.players, r.max_players)
+                            } else {
+                                format!("🔥 W pokoju: {}/{} os.", r.players, r.max_players)
+                            };
+                            let resp = Self::game_card(
+                                ui,
+                                egui::vec2(card_w, card_h),
+                                &title,
+                                &subtitle,
+                                0,
+                                true,
+                            );
+                            if resp.clicked() && !is_full {
+                                chosen_room = Some(r.room_id.clone());
+                            }
+                            ui.add_space(14.0);
+                        }
+                    } else {
+                        let spacing = (avail.x * 0.03).clamp(16.0, 36.0);
+                        let card_w = ((avail.x * 0.82 - spacing) / 2.0).clamp(240.0, 420.0);
+                        let card_h = (avail.y * 0.30).clamp(140.0, 220.0);
+                        let total_w = card_w * 2.0 + spacing;
+                        let left_pad = ((avail.x - total_w) / 2.0).max(0.0);
+
+                        ui.horizontal(|ui| {
+                            ui.add_space(left_pad);
+
+                            for (idx, r) in rooms_snapshot.iter().enumerate() {
+                                let is_full = r.players >= r.max_players;
+                                let title = format!("🎲 Pokój #{} ({})", idx + 1, r.room_id);
+                                let subtitle = if is_full {
+                                    format!("⛔ PEŁNY ({}/{} os.)", r.players, r.max_players)
+                                } else if r.players == 0 {
+                                    format!("🟢 Wolny ({}/{} os.)", r.players, r.max_players)
+                                } else {
+                                    format!("🔥 W pokoju: {}/{} os.", r.players, r.max_players)
+                                };
+
+                                let resp = Self::game_card(
+                                    ui,
+                                    egui::vec2(card_w, card_h),
+                                    &title,
+                                    &subtitle,
+                                    0,
+                                    true,
+                                );
+                                if resp.clicked() && !is_full {
+                                    chosen_room = Some(r.room_id.clone());
+                                }
+                                if idx == 0 {
+                                    ui.add_space(spacing);
+                                }
+                            }
+                        });
                     }
-                }
+
+                    if let Some(room_id) = chosen_room {
+                        self.audio.play(Sfx::CardSlide);
+                        if self.net.connect_to_room(&room_id) {
+                            self.last_room_order.clear();
+                            self.last_sent_focus = None;
+                            self.last_my_pair_game = None;
+                            self.last_watched_pair = None;
+                            self.current_screen = Screen::Hub;
+                        }
+                    }
+
+                    ui.add_space(24.0);
+
+                    if ui
+                        .button(
+                            egui::RichText::new(
+                                "👤 Graj Solo Online (Pasjans / Blackjack bez pokoju MP)",
+                            )
+                            .size((15.0 * ui_scale).clamp(12.5, 18.0))
+                            .color(egui::Color32::from_rgb(150, 200, 255)),
+                        )
+                        .clicked()
+                    {
+                        self.audio.play(Sfx::Click);
+                        self.net.disconnect_room();
+                        self.last_room_order.clear();
+                        self.last_sent_focus = None;
+                        self.leave_online_games();
+                        self.current_screen = Screen::Hub;
+                    }
+                    ui.add_space(16.0);
+                });
             });
-
-            if let Some(room_id) = chosen_room {
-                self.audio.play(Sfx::CardSlide);
-                if self.net.connect_to_room(&room_id) {
-                    self.last_room_order.clear();
-                    self.last_sent_focus = None;
-                    self.last_my_pair_game = None;
-                    self.last_watched_pair = None;
-                    self.current_screen = Screen::Hub;
-                }
-            }
-
-            ui.add_space(28.0);
-
-            if ui
-                .button(
-                    egui::RichText::new(
-                        "👤 Graj Solo Online (Pasjans / Blackjack bez pokoju MP)",
-                    )
-                    .size((15.0 * ui_scale).clamp(12.5, 18.0))
-                    .color(egui::Color32::from_rgb(150, 200, 255)),
-                )
-                .clicked()
-            {
-                self.audio.play(Sfx::Click);
-                self.net.disconnect_room();
-                self.last_room_order.clear();
-                self.last_sent_focus = None;
-                self.leave_online_games();
-                self.current_screen = Screen::Hub;
-            }
-        });
     }
 
     fn render_hub(&mut self, ui: &mut egui::Ui) {
         let avail = ui.available_size();
-
-        let spacing = (avail.x.min(avail.y) * 0.028).clamp(12.0, 28.0);
-        let card_w = ((avail.x * 0.90 - spacing * 3.0) / 4.0).clamp(185.0, 340.0);
-        let card_h = ((avail.y * 0.64 - spacing) / 2.0).clamp(130.0, 270.0);
+        let is_portrait = avail.y > avail.x || avail.x < 760.0;
+        let cols: usize = if is_portrait { 2 } else { 4 };
+        let spacing = (avail.x.min(avail.y) * 0.026).clamp(10.0, 26.0);
+        let card_w = if is_portrait {
+            ((avail.x * 0.92 - spacing) / 2.0).clamp(145.0, 310.0)
+        } else {
+            ((avail.x * 0.90 - spacing * 3.0) / 4.0).clamp(180.0, 340.0)
+        };
+        let card_h = if is_portrait {
+            (card_w * 0.72).clamp(105.0, 175.0)
+        } else {
+            ((avail.y * 0.64 - spacing) / 2.0).clamp(130.0, 265.0)
+        };
         let card_size = egui::vec2(card_w, card_h);
 
-        let title_size = (avail.y * 0.055).clamp(28.0, 52.0);
-        let total_content_h = title_size + spacing * 2.1 + card_h * 2.0;
-        let top_padding = ((avail.y - total_content_h) / 2.0).max(16.0);
+        let title_size = (avail.y * 0.05).clamp(24.0, 48.0);
+        let rows = if is_portrait { 4.0 } else { 2.0 };
+        let total_content_h = title_size + spacing * rows + card_h * rows;
+        let top_padding = ((avail.y - total_content_h) / 2.0).max(12.0);
 
-        ui.vertical_centered(|ui| {
-            ui.add_space(top_padding);
-            ui.heading(
-                egui::RichText::new("Wybierz grę")
-                    .size(title_size)
-                    .strong()
-                    .color(egui::Color32::WHITE),
-            );
-            ui.add_space(spacing);
+        let chess_spectators = self.spectator_count_for_screen(Screen::Chess);
+        let battleship_spectators = self.spectator_count_for_screen(Screen::Battleship);
+        let mp_room_connected = self.is_online_session && self.net.connected_room.is_some();
 
-            let total_grid_w = card_w * 4.0 + spacing * 3.0;
-            let left_pad = ((avail.x - total_grid_w) / 2.0).max(0.0);
-            let chess_spectators = self.spectator_count_for_screen(Screen::Chess);
-            let battleship_spectators = self.spectator_count_for_screen(Screen::Battleship);
-            let mp_room_connected = self.is_online_session && self.net.connected_room.is_some();
+        let cat_sub = if mp_room_connected {
+            "Słowna rywalizacja z głosowaniem 3/4"
+        } else {
+            "Dostępne tylko w pokoju Multiplayer!"
+        };
 
-            ui.horizontal(|ui| {
-                ui.add_space(left_pad);
+        let items: [(Screen, &str, &str, usize, bool); 8] = [
+            (
+                Screen::Chess,
+                "♟ Szachy",
+                "Klasyczny pojedynek na szachownicy",
+                chess_spectators,
+                true,
+            ),
+            (
+                Screen::Battleship,
+                "🚢 Statki",
+                "Taktyczna bitwa morska na radarze",
+                battleship_spectators,
+                true,
+            ),
+            (
+                Screen::Ludo,
+                "🎲 Chińczyk",
+                "Planszówka Ludo dla 2-4 graczy",
+                0,
+                true,
+            ),
+            (
+                Screen::Uno,
+                "🌈 UNO",
+                "Kolorowa gra karciana dla 2-4 graczy",
+                0,
+                true,
+            ),
+            (
+                Screen::Solitaire,
+                "🃏 Pasjans",
+                "Klasyczny Klondike Solitaire",
+                0,
+                true,
+            ),
+            (
+                Screen::Blackjack,
+                "🎰 Blackjack",
+                "Oko / 21 przeciwko krupierowi",
+                0,
+                true,
+            ),
+            (
+                Screen::War,
+                "⚔ Wojna",
+                "Szybki pojedynek o całą talię",
+                0,
+                true,
+            ),
+            (
+                Screen::Categories,
+                "🌍 Państwa-Miasta",
+                cat_sub,
+                0,
+                mp_room_connected,
+            ),
+        ];
 
-                egui::Grid::new("games_grid")
-                    .spacing([spacing, spacing])
-                    .show(ui, |ui| {
-                        if Self::game_card(
-                            ui,
-                            card_size,
-                            "♟ Szachy",
-                            "Klasyczny pojedynek na szachownicy",
-                            chess_spectators,
-                            true,
-                        )
-                        .clicked()
-                        {
-                            self.open_game(Screen::Chess);
-                        }
-                        if Self::game_card(
-                            ui,
-                            card_size,
-                            "🚢 Statki",
-                            "Taktyczna bitwa morska na radarze",
-                            battleship_spectators,
-                            true,
-                        )
-                        .clicked()
-                        {
-                            self.open_game(Screen::Battleship);
-                        }
-                        if Self::game_card(
-                            ui,
-                            card_size,
-                            "🎲 Chińczyk",
-                            "Planszówka Ludo dla 2-4 graczy",
-                            0,
-                            true,
-                        )
-                        .clicked()
-                        {
-                            self.open_game(Screen::Ludo);
-                        }
-                        if Self::game_card(
-                            ui,
-                            card_size,
-                            "🌈 UNO",
-                            "Kolorowa gra karciana dla 2-4 graczy",
-                            0,
-                            true,
-                        )
-                        .clicked()
-                        {
-                            self.open_game(Screen::Uno);
-                        }
-                        ui.end_row();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(top_padding);
+                    ui.heading(
+                        egui::RichText::new("Wybierz grę")
+                            .size(title_size)
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                    );
+                    ui.add_space(spacing);
 
-                        if Self::game_card(
-                            ui,
-                            card_size,
-                            "🃏 Pasjans",
-                            "Klasyczny Klondike Solitaire",
-                            0,
-                            true,
-                        )
-                        .clicked()
-                        {
-                            self.open_game(Screen::Solitaire);
-                        }
-                        if Self::game_card(
-                            ui,
-                            card_size,
-                            "🎰 Blackjack",
-                            "Oko / 21 przeciwko krupierowi",
-                            0,
-                            true,
-                        )
-                        .clicked()
-                        {
-                            self.open_game(Screen::Blackjack);
-                        }
-                        if Self::game_card(
-                            ui,
-                            card_size,
-                            "⚔ Wojna",
-                            "Szybki pojedynek o całą talię",
-                            0,
-                            true,
-                        )
-                        .clicked()
-                        {
-                            self.open_game(Screen::War);
-                        }
+                    let total_grid_w =
+                        card_w * cols as f32 + spacing * (cols.saturating_sub(1)) as f32;
+                    let left_pad = ((avail.x - total_grid_w) / 2.0).max(0.0);
 
-                        let cat_sub = if mp_room_connected {
-                            "Słowna rywalizacja z głosowaniem 3/4"
-                        } else {
-                            "Dostępne tylko w pokoju Multiplayer!"
-                        };
-                        if Self::game_card(
-                            ui,
-                            card_size,
-                            "🌍 Państwa-Miasta",
-                            cat_sub,
-                            0,
-                            mp_room_connected,
-                        )
-                        .clicked()
-                            && mp_room_connected
-                        {
-                            self.open_game(Screen::Categories);
-                        }
-                        ui.end_row();
+                    ui.horizontal(|ui| {
+                        ui.add_space(left_pad);
+
+                        egui::Grid::new("games_grid")
+                            .spacing([spacing, spacing])
+                            .show(ui, |ui| {
+                                for (idx, &(screen, title, sub, spec, enabled)) in
+                                    items.iter().enumerate()
+                                {
+                                    if Self::game_card(ui, card_size, title, sub, spec, enabled)
+                                        .clicked()
+                                        && enabled
+                                    {
+                                        self.open_game(screen);
+                                    }
+                                    if (idx + 1) % cols == 0 {
+                                        ui.end_row();
+                                    }
+                                }
+                            });
                     });
+                    ui.add_space(16.0);
+                });
             });
-        });
     }
 
     fn game_card(
@@ -1550,7 +1586,7 @@ impl GameHubApp {
         if ui.is_rect_visible(rect) {
             let scale_h = desired_size.y / 160.0;
             let scale_w = desired_size.x / 310.0;
-            let scale = scale_h.min(scale_w).clamp(0.65, 1.35);
+            let scale = scale_h.min(scale_w).clamp(0.58, 1.35);
 
             let visuals = ui.style().interact(&response);
 
@@ -1581,10 +1617,10 @@ impl GameHubApp {
             ui.painter()
                 .rect(draw_rect, 14.0 * scale, bg_fill, bg_stroke);
 
-            let title_font = (22.0 * scale).clamp(14.5, 34.0);
-            let sub_font = (12.5 * scale).clamp(10.0, 18.0);
+            let title_font = (22.0 * scale).clamp(14.0, 34.0);
+            let sub_font = (12.0 * scale).clamp(9.5, 18.0);
 
-            let text_pos = draw_rect.center() - egui::vec2(0.0, 15.0 * scale);
+            let text_pos = draw_rect.center() - egui::vec2(0.0, 14.0 * scale);
             ui.painter().text(
                 text_pos,
                 egui::Align2::CENTER_CENTER,
@@ -1597,7 +1633,7 @@ impl GameHubApp {
                 },
             );
 
-            let sub_pos = draw_rect.center() + egui::vec2(0.0, 20.0 * scale);
+            let sub_pos = draw_rect.center() + egui::vec2(0.0, 19.0 * scale);
             ui.painter().text(
                 sub_pos,
                 egui::Align2::CENTER_CENTER,
@@ -1612,8 +1648,8 @@ impl GameHubApp {
 
             if !enabled {
                 let lock_badge = egui::Rect::from_center_size(
-                    egui::pos2(draw_rect.center().x, draw_rect.top() + 18.0 * scale),
-                    egui::vec2(150.0 * scale, 22.0 * scale),
+                    egui::pos2(draw_rect.center().x, draw_rect.top() + 16.0 * scale),
+                    egui::vec2(145.0 * scale, 20.0 * scale),
                 );
                 ui.painter().rect_filled(
                     lock_badge,
@@ -1624,7 +1660,7 @@ impl GameHubApp {
                     lock_badge.center(),
                     egui::Align2::CENTER_CENTER,
                     "TYLKO MULTIPLAYER",
-                    egui::FontId::proportional((10.5 * scale).max(8.5)),
+                    egui::FontId::proportional((10.0 * scale).max(8.0)),
                     egui::Color32::from_rgb(255, 175, 130),
                 );
             }

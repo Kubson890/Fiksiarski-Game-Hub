@@ -674,13 +674,11 @@ impl UnoGame {
         }
 
         let full_rect = ui.available_rect_before_wrap();
-        // Głębokie, eleganckie tło stołu karcianego
         ui.painter()
             .rect_filled(full_rect, 12.0, egui::Color32::from_rgb(18, 24, 34));
 
-        // Dekoracyjna elipsa na środku stołu z poświatą aktualnego koloru UNO
         let felt_rect = full_rect.shrink2(egui::vec2(
-            full_rect.width() * 0.08,
+            full_rect.width() * 0.06,
             full_rect.height() * 0.14,
         ));
         let glow_col = self.active_color.egui_color().gamma_multiply(0.14);
@@ -694,11 +692,12 @@ impl UnoGame {
             ),
         );
 
-        let margin = (full_rect.width() * 0.022).clamp(12.0, 28.0);
+        let margin = (full_rect.width() * 0.022).clamp(10.0, 26.0);
         let content_rect = full_rect.shrink(margin);
+        let is_portrait = content_rect.height() > content_rect.width() || content_rect.width() < 680.0;
         let scale = (content_rect.width() / 1280.0)
             .min(content_rect.height() / 720.0)
-            .clamp(0.75, 1.35);
+            .clamp(0.72, 1.35);
 
         let mut child_ui = ui.new_child(
             egui::UiBuilder::new()
@@ -707,11 +706,10 @@ impl UnoGame {
         );
         let ui = &mut child_ui;
 
-        // --- 1. GÓRNY PASEK KONTROLNY ---
         ui.horizontal_wrapped(|ui| {
             if !self.online_mode || self.my_player_idx == 0 {
                 if ui
-                    .button(egui::RichText::new("↻ Nowe rozdanie").size(15.5 * scale))
+                    .button(egui::RichText::new("↻ Nowe rozdanie").size((15.0 * scale).max(12.5)))
                     .clicked()
                 {
                     audio.play(Sfx::CardSlide);
@@ -723,12 +721,12 @@ impl UnoGame {
             if !self.online_mode {
                 for p in 1..4 {
                     let txt = match self.player_types[p] {
-                        PlayerType::Bot => format!("Miejsce #{}: BOT", p + 1),
-                        PlayerType::Human => format!("Miejsce #{}: GRACZ", p + 1),
-                        PlayerType::Disabled => format!("Miejsce #{}: WYŁ.", p + 1),
+                        PlayerType::Bot => format!("#{}: BOT", p + 1),
+                        PlayerType::Human => format!("#{}: GRACZ", p + 1),
+                        PlayerType::Disabled => format!("#{}: WYŁ.", p + 1),
                     };
                     if ui
-                        .button(egui::RichText::new(txt).size(14.0 * scale))
+                        .button(egui::RichText::new(txt).size((13.5 * scale).max(11.5)))
                         .clicked()
                     {
                         audio.play(Sfx::Click);
@@ -745,128 +743,111 @@ impl UnoGame {
 
             ui.label(
                 egui::RichText::new(&self.status_text)
-                    .size(17.5 * scale)
+                    .size((16.5 * scale).max(13.0))
                     .strong()
                     .color(egui::Color32::from_rgb(255, 225, 115)),
             );
         });
 
-        ui.add_space(12.0 * scale);
+        ui.add_space(8.0 * scale);
 
-        // --- 2. KARTY GRACZY PRZY STOLE ---
         let avail_w = ui.available_width();
-        let gap = 12.0 * scale;
-        let card_box_w = ((avail_w - gap * 3.0) / 4.0).max(140.0);
-        let card_box_h = (68.0 * scale).clamp(56.0, 86.0);
+        let gap = 10.0 * scale;
+        let cols = if is_portrait { 2 } else { 4 };
+        let card_box_w = ((avail_w - gap * (cols - 1) as f32) / cols as f32).max(130.0);
+        let card_box_h = (58.0 * scale).clamp(48.0, 82.0);
 
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            for p in 0..4 {
-                let is_turn = self.current_turn == p && self.winner.is_none();
-                let is_disabled = self.player_types[p] == PlayerType::Disabled;
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(card_box_w, card_box_h),
-                    egui::Sense::hover(),
-                );
+        egui::Grid::new("uno_players_grid")
+            .spacing([gap, gap])
+            .show(ui, |ui| {
+                for p in 0..4 {
+                    let is_turn = self.current_turn == p && self.winner.is_none();
+                    let is_disabled = self.player_types[p] == PlayerType::Disabled;
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(card_box_w, card_box_h),
+                        egui::Sense::hover(),
+                    );
 
-                let bg = if is_disabled {
-                    egui::Color32::from_rgb(24, 27, 36)
-                } else if is_turn {
-                    egui::Color32::from_rgb(44, 62, 92)
-                } else {
-                    egui::Color32::from_rgb(30, 36, 48)
-                };
-
-                let stroke = if is_turn {
-                    egui::Stroke::new(2.5_f32, egui::Color32::GOLD)
-                } else {
-                    egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(65, 74, 92))
-                };
-
-                ui.painter().rect(rect, 10.0 * scale, bg, stroke);
-
-                // Kolorowy znacznik gracza po lewej
-                let dot_center =
-                    egui::pos2(rect.left() + 18.0 * scale, rect.top() + 22.0 * scale);
-                let accent = if is_disabled {
-                    egui::Color32::DARK_GRAY
-                } else {
-                    Self::player_accent(p)
-                };
-                ui.painter().circle_filled(dot_center, 7.0 * scale, accent);
-                ui.painter().circle_stroke(
-                    dot_center,
-                    7.0 * scale,
-                    egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
-                );
-
-                let role_tag = if is_disabled {
-                    "Wolne miejsce"
-                } else if (self.online_mode && p == self.my_player_idx)
-                    || (!self.online_mode && p == 0)
-                {
-                    "TY"
-                } else if !self.online_mode {
-                    "BOT"
-                } else {
-                    "ONLINE"
-                };
-
-                ui.painter().text(
-                    egui::pos2(rect.left() + 32.0 * scale, rect.top() + 22.0 * scale),
-                    egui::Align2::LEFT_CENTER,
-                    format!("{} ({})", Self::player_name(p), role_tag),
-                    egui::FontId::proportional(15.5 * scale),
-                    if is_disabled {
-                        egui::Color32::GRAY
+                    let bg = if is_disabled {
+                        egui::Color32::from_rgb(24, 27, 36)
+                    } else if is_turn {
+                        egui::Color32::from_rgb(44, 62, 92)
                     } else {
-                        egui::Color32::WHITE
-                    },
-                );
-
-                if !is_disabled {
-                    let cnt = self.hands[p].len();
-                    let sub_txt = if cnt == 1 {
-                        "🔥 UNO! (1 karta)".to_string()
-                    } else {
-                        format!("Kart w ręce: {}", cnt)
+                        egui::Color32::from_rgb(30, 36, 48)
                     };
+
+                    let stroke = if is_turn {
+                        egui::Stroke::new(2.5_f32, egui::Color32::GOLD)
+                    } else {
+                        egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(65, 74, 92))
+                    };
+
+                    ui.painter().rect(rect, 10.0 * scale, bg, stroke);
+
+                    let dot_center =
+                        egui::pos2(rect.left() + 15.0 * scale, rect.top() + 18.0 * scale);
+                    let accent = if is_disabled {
+                        egui::Color32::DARK_GRAY
+                    } else {
+                        Self::player_accent(p)
+                    };
+                    ui.painter().circle_filled(dot_center, 6.0 * scale, accent);
+                    ui.painter().circle_stroke(
+                        dot_center,
+                        6.0 * scale,
+                        egui::Stroke::new(1.2_f32, egui::Color32::WHITE),
+                    );
+
+                    let role_tag = if is_disabled {
+                        "Wolne"
+                    } else if (self.online_mode && p == self.my_player_idx)
+                        || (!self.online_mode && p == 0)
+                    {
+                        "TY"
+                    } else if !self.online_mode {
+                        "BOT"
+                    } else {
+                        "ONLINE"
+                    };
+
                     ui.painter().text(
-                        egui::pos2(rect.left() + 32.0 * scale, rect.bottom() - 18.0 * scale),
+                        egui::pos2(rect.left() + 28.0 * scale, rect.top() + 18.0 * scale),
                         egui::Align2::LEFT_CENTER,
-                        sub_txt,
-                        egui::FontId::proportional(13.5 * scale),
-                        if cnt == 1 {
-                            egui::Color32::GOLD
+                        format!("{} ({})", Self::player_name(p), role_tag),
+                        egui::FontId::proportional((14.5 * scale).max(11.5)),
+                        if is_disabled {
+                            egui::Color32::GRAY
                         } else {
-                            egui::Color32::from_rgb(175, 190, 210)
+                            egui::Color32::WHITE
                         },
                     );
 
-                    // Wizualny mini-wachlarz kart po prawej stronie kafelka
-                    let preview_cards = cnt.min(6);
-                    let mini_w = 13.0 * scale;
-                    let mini_h = 20.0 * scale;
-                    let base_x =
-                        rect.right() - 18.0 * scale - (preview_cards as f32 * 6.0 * scale);
-                    let base_y = rect.center().y - mini_h * 0.5;
-                    for i in 0..preview_cards {
-                        let mr = egui::Rect::from_min_size(
-                            egui::pos2(base_x + i as f32 * 6.0 * scale, base_y),
-                            egui::vec2(mini_w, mini_h),
-                        );
-                        ui.painter().rect(
-                            mr,
-                            3.0,
-                            egui::Color32::from_rgb(200, 45, 45),
-                            egui::Stroke::new(1.0_f32, egui::Color32::WHITE),
+                    if !is_disabled {
+                        let cnt = self.hands[p].len();
+                        let sub_txt = if cnt == 1 {
+                            "🔥 UNO! (1)".to_string()
+                        } else {
+                            format!("Kart: {}", cnt)
+                        };
+                        ui.painter().text(
+                            egui::pos2(rect.left() + 28.0 * scale, rect.bottom() - 15.0 * scale),
+                            egui::Align2::LEFT_CENTER,
+                            sub_txt,
+                            egui::FontId::proportional((13.0 * scale).max(10.5)),
+                            if cnt == 1 {
+                                egui::Color32::GOLD
+                            } else {
+                                egui::Color32::from_rgb(175, 190, 210)
+                            },
                         );
                     }
-                }
-            }
-        });
 
-        // --- 3. ŚRODKOWA ARENA STOŁU ---
+                    if (p + 1) % cols == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
+
         let my_seat = if self.online_mode {
             self.my_player_idx
         } else {
@@ -882,8 +863,8 @@ impl UnoGame {
         } else {
             0.0
         };
-        let hand_section_h = (remaining_h * 0.42).clamp(165.0, 260.0);
-        let arena_h = (remaining_h - hand_section_h - wild_bar_h - 14.0 * scale).max(160.0);
+        let hand_section_h = (remaining_h * 0.42).clamp(150.0, 250.0);
+        let arena_h = (remaining_h - hand_section_h - wild_bar_h - 10.0 * scale).max(145.0);
 
         let (arena_rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), arena_h),
@@ -891,28 +872,21 @@ impl UnoGame {
         );
         let center = arena_rect.center();
 
-        let center_card_h = (arena_h * 0.78).clamp(135.0, 225.0);
+        let center_card_h = (arena_h * if is_portrait { 0.65 } else { 0.78 }).clamp(115.0, 215.0);
         let center_card_w = center_card_h / 1.42;
         let center_card_size = egui::vec2(center_card_w, center_card_h);
 
-        // Dekoracyjny pierścień na środku stołu
-        let ring_radius = center_card_h * 0.62;
-        ui.painter().circle_stroke(
-            center,
-            ring_radius,
-            egui::Stroke::new(
-                3.0_f32,
-                self.active_color.egui_color().gamma_multiply(0.45),
-            ),
-        );
+        let cards_y = if is_portrait {
+            center.y + 16.0 * scale
+        } else {
+            center.y
+        };
 
-        // Stos dobierania (po lewej od środka)
-        let deck_center = egui::pos2(center.x - center_card_w * 0.95, center.y);
+        let deck_center = egui::pos2(center.x - center_card_w * 0.75, cards_y);
         let deck_rect = egui::Rect::from_center_size(deck_center, center_card_size);
 
-        // Efekt grubości talii (kilka kart pod spodem)
         for offset in (1..=3).rev() {
-            let off = offset as f32 * 3.0 * scale;
+            let off = offset as f32 * 2.5 * scale;
             let under = deck_rect.translate(egui::vec2(-off, off));
             ui.painter().rect(
                 under,
@@ -943,92 +917,107 @@ impl UnoGame {
             self.draw_action(my_seat, true, audio);
         }
 
-        // Karta na wierzchu stosu zrzutu (po prawej od środka)
-        let discard_center = egui::pos2(center.x + center_card_w * 0.95, center.y);
+        let discard_center = egui::pos2(center.x + center_card_w * 0.75, cards_y);
         let discard_rect = egui::Rect::from_center_size(discard_center, center_card_size);
 
         if self.discard.len() > 1 {
             let prev_card = &self.discard[self.discard.len() - 2];
-            let under_discard = discard_rect.translate(egui::vec2(-6.0 * scale, 5.0 * scale));
+            let under_discard = discard_rect.translate(egui::vec2(-5.0 * scale, 4.0 * scale));
             Self::draw_uno_card(ui.painter(), under_discard, prev_card, false, false);
         }
         if let Some(top_card) = self.discard.last() {
             Self::draw_uno_card(ui.painter(), discard_rect, top_card, false, false);
         }
 
-        // Elegancki panel statusu koloru i kierunku po prawej stronie stołu
-        let badge_w = (195.0 * scale).clamp(155.0, 235.0);
-        let badge_h = (112.0 * scale).clamp(90.0, 135.0);
-        let badge_rect = egui::Rect::from_center_size(
-            egui::pos2(
-                (center.x + center_card_w * 2.55)
-                    .min(arena_rect.right() - badge_w * 0.55),
-                center.y,
-            ),
-            egui::vec2(badge_w, badge_h),
-        );
-
-        ui.painter().rect(
-            badge_rect,
-            14.0 * scale,
-            egui::Color32::from_rgb(28, 34, 46),
-            egui::Stroke::new(2.2_f32, self.active_color.egui_color()),
-        );
-
-        let swatch_center =
-            egui::pos2(badge_rect.left() + 34.0 * scale, badge_rect.center().y - 12.0 * scale);
-        ui.painter().circle(
-            swatch_center,
-            18.0 * scale,
-            self.active_color.egui_color(),
-            egui::Stroke::new(2.5_f32, egui::Color32::WHITE),
-        );
-
-        ui.painter().text(
-            egui::pos2(badge_rect.left() + 62.0 * scale, badge_rect.center().y - 22.0 * scale),
-            egui::Align2::LEFT_CENTER,
-            "AKTYWNY KOLOR:",
-            egui::FontId::proportional(11.5 * scale),
-            egui::Color32::from_rgb(160, 175, 195),
-        );
-        ui.painter().text(
-            egui::pos2(badge_rect.left() + 62.0 * scale, badge_rect.center().y - 3.0 * scale),
-            egui::Align2::LEFT_CENTER,
-            self.active_color.name_pl(),
-            egui::FontId::proportional(17.5 * scale),
-            egui::Color32::WHITE,
-        );
-
         let dir_txt = if self.direction > 0 {
-            "Kierunek: ➡ Zgodnie"
+            "➡ Zgodnie"
         } else {
-            "Kierunek: ⬅ Przeciwnie"
+            "⬅ Przeciwnie"
         };
-        ui.painter().text(
-            egui::pos2(badge_rect.center().x, badge_rect.bottom() - 20.0 * scale),
-            egui::Align2::CENTER_CENTER,
-            dir_txt,
-            egui::FontId::proportional(14.0 * scale),
-            egui::Color32::from_rgb(235, 215, 120),
-        );
 
-        // --- 4. PASEK WYBORU KOLORU DLA DZIKIEJ KARTY ---
+        if is_portrait {
+            // Na wąskim ekranie pokazujemy pasek aktywnego koloru nad kartami centralnymi
+            let pill_rect = egui::Rect::from_center_size(
+                egui::pos2(center.x, arena_rect.top() + 18.0 * scale),
+                egui::vec2(260.0 * scale, 28.0 * scale),
+            );
+            ui.painter().rect(
+                pill_rect,
+                14.0 * scale,
+                egui::Color32::from_rgb(28, 34, 46),
+                egui::Stroke::new(2.0_f32, self.active_color.egui_color()),
+            );
+            ui.painter().text(
+                pill_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("Kolor: {}  |  {}", self.active_color.name_pl(), dir_txt),
+                egui::FontId::proportional((13.5 * scale).max(11.5)),
+                egui::Color32::WHITE,
+            );
+        } else {
+            let badge_w = (190.0 * scale).clamp(150.0, 230.0);
+            let badge_h = (108.0 * scale).clamp(86.0, 130.0);
+            let badge_rect = egui::Rect::from_center_size(
+                egui::pos2(
+                    (center.x + center_card_w * 2.35)
+                        .min(arena_rect.right() - badge_w * 0.55),
+                    center.y,
+                ),
+                egui::vec2(badge_w, badge_h),
+            );
+
+            ui.painter().rect(
+                badge_rect,
+                14.0 * scale,
+                egui::Color32::from_rgb(28, 34, 46),
+                egui::Stroke::new(2.2_f32, self.active_color.egui_color()),
+            );
+
+            let swatch_center = egui::pos2(
+                badge_rect.left() + 32.0 * scale,
+                badge_rect.center().y - 12.0 * scale,
+            );
+            ui.painter().circle(
+                swatch_center,
+                16.0 * scale,
+                self.active_color.egui_color(),
+                egui::Stroke::new(2.2_f32, egui::Color32::WHITE),
+            );
+
+            ui.painter().text(
+                egui::pos2(
+                    badge_rect.left() + 58.0 * scale,
+                    badge_rect.center().y - 12.0 * scale,
+                ),
+                egui::Align2::LEFT_CENTER,
+                self.active_color.name_pl(),
+                egui::FontId::proportional(17.0 * scale),
+                egui::Color32::WHITE,
+            );
+            ui.painter().text(
+                egui::pos2(badge_rect.center().x, badge_rect.bottom() - 20.0 * scale),
+                egui::Align2::CENTER_CENTER,
+                format!("Kierunek: {}", dir_txt),
+                egui::FontId::proportional(13.5 * scale),
+                egui::Color32::from_rgb(235, 215, 120),
+            );
+        }
+
         if let Some(pending_idx) = self.choosing_wild_card {
             ui.vertical_centered(|ui| {
                 egui::Frame::none()
                     .fill(egui::Color32::from_rgb(36, 42, 58))
                     .rounding(12.0)
                     .stroke(egui::Stroke::new(2.0_f32, egui::Color32::GOLD))
-                    .inner_margin(egui::Margin::symmetric(18.0, 10.0))
+                    .inner_margin(egui::Margin::symmetric(14.0, 8.0))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.label(
-                                egui::RichText::new("Wybierz nowy kolor obowiązujący na stole:")
-                                    .size(16.0 * scale)
+                                egui::RichText::new("Nowy kolor:")
+                                    .size((15.0 * scale).max(12.5))
                                     .strong()
                                     .color(egui::Color32::WHITE),
                             );
-                            ui.add_space(8.0);
                             for col in [
                                 UnoColor::Red,
                                 UnoColor::Green,
@@ -1037,12 +1026,12 @@ impl UnoGame {
                             ] {
                                 let btn = egui::Button::new(
                                     egui::RichText::new(col.name_pl())
-                                        .size(15.0 * scale)
+                                        .size((14.0 * scale).max(12.0))
                                         .color(egui::Color32::WHITE)
                                         .strong(),
                                 )
                                 .fill(col.egui_color())
-                                .min_size(egui::vec2(105.0 * scale, 34.0 * scale));
+                                .min_size(egui::vec2(88.0 * scale, 32.0 * scale));
                                 if ui.add(btn).clicked() {
                                     self.choosing_wild_card = None;
                                     let _ = self.play_card(
@@ -1054,19 +1043,12 @@ impl UnoGame {
                                     );
                                 }
                             }
-                            if ui
-                                .button(egui::RichText::new("Anuluj").size(14.0 * scale))
-                                .clicked()
-                            {
-                                self.choosing_wild_card = None;
-                            }
                         });
                     });
             });
-            ui.add_space(6.0 * scale);
+            ui.add_space(4.0 * scale);
         }
 
-        // --- 5. DOLNY PANEL: WYŚRODKOWANA RĘKA GRACZA (WACHLARZ) ---
         let hand_frame_rect = ui.available_rect_before_wrap();
         ui.painter().rect(
             hand_frame_rect,
@@ -1083,18 +1065,18 @@ impl UnoGame {
         );
 
         let banner_text = if is_my_turn {
-            "🟢 TWOJA TURA — Kliknij pasującą kartę (podświetloną na złoto) lub dobierz ze stosu"
+            "🟢 TWOJA TURA — Kliknij pasującą kartę lub dobierz ze stosu"
         } else {
             "Twoje karty w ręce (czekaj na swoją kolej)"
         };
         ui.painter().text(
             egui::pos2(
                 hand_frame_rect.center().x,
-                hand_frame_rect.top() + 18.0 * scale,
+                hand_frame_rect.top() + 16.0 * scale,
             ),
             egui::Align2::CENTER_CENTER,
             banner_text,
-            egui::FontId::proportional(15.5 * scale),
+            egui::FontId::proportional((14.5 * scale).max(11.5)),
             if is_my_turn {
                 egui::Color32::from_rgb(110, 245, 140)
             } else {
@@ -1104,12 +1086,12 @@ impl UnoGame {
 
         let cards_area = egui::Rect::from_min_max(
             egui::pos2(
-                hand_frame_rect.left() + 18.0 * scale,
-                hand_frame_rect.top() + 36.0 * scale,
+                hand_frame_rect.left() + 12.0 * scale,
+                hand_frame_rect.top() + 32.0 * scale,
             ),
             egui::pos2(
-                hand_frame_rect.right() - 18.0 * scale,
-                hand_frame_rect.bottom() - 12.0 * scale,
+                hand_frame_rect.right() - 12.0 * scale,
+                hand_frame_rect.bottom() - 10.0 * scale,
             ),
         );
 
@@ -1118,11 +1100,11 @@ impl UnoGame {
         let num_cards = my_cards.len();
 
         if num_cards > 0 {
-            let hand_card_h = (cards_area.height() - 14.0 * scale).clamp(110.0, 205.0);
+            let hand_card_h = (cards_area.height() - 12.0 * scale).clamp(95.0, 195.0);
             let hand_card_w = hand_card_h / 1.42;
             let hand_card_size = egui::vec2(hand_card_w, hand_card_h);
 
-            let ideal_step = hand_card_w + 10.0 * scale;
+            let ideal_step = hand_card_w + 8.0 * scale;
             let max_total_w = (cards_area.width() - hand_card_w).max(10.0);
             let step_x = if num_cards > 1 {
                 ideal_step.min(max_total_w / (num_cards - 1) as f32)
@@ -1143,7 +1125,7 @@ impl UnoGame {
                 let hit_w = if idx + 1 == num_cards {
                     hand_card_w
                 } else {
-                    step_x.max(24.0)
+                    step_x.max(22.0)
                 };
                 let hit_rect = egui::Rect::from_min_size(
                     egui::pos2(x, base_y - 12.0 * scale),
@@ -1179,14 +1161,13 @@ impl UnoGame {
                 );
             }
 
-            // Rysujemy najechaną kartę na samym wierzchu, żeby nie była przykryta przez sąsiednią
             if let Some(idx) = hovered_idx {
                 let card = &my_cards[idx];
                 let playable = is_my_turn && card.can_play_on(&top_card, self.active_color);
                 let lift = if playable {
-                    -18.0 * scale
+                    -16.0 * scale
                 } else {
-                    -6.0 * scale
+                    -5.0 * scale
                 };
                 let x = start_x + idx as f32 * step_x;
                 let rect = egui::Rect::from_min_size(egui::pos2(x, base_y + lift), hand_card_size);

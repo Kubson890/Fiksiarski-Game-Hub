@@ -537,7 +537,7 @@ impl ChessGame {
         ui.painter()
             .rect_filled(full_rect, 12.0, egui::Color32::from_rgb(28, 30, 36));
 
-        let margin = (full_rect.width() * 0.02).clamp(12.0, 28.0);
+        let margin = (full_rect.width() * 0.02).clamp(10.0, 26.0);
         let content_rect = full_rect.shrink(margin);
 
         let mut child_ui = ui.new_child(
@@ -547,10 +547,10 @@ impl ChessGame {
         );
         let ui = &mut child_ui;
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if !self.online_mode {
                 if ui
-                    .button(egui::RichText::new("🔄 Nowa partia").size(16.0))
+                    .button(egui::RichText::new("🔄 Nowa partia").size(15.0))
                     .clicked()
                 {
                     audio.play(Sfx::Click);
@@ -559,12 +559,12 @@ impl ChessGame {
                 ui.separator();
 
                 let mode_label = if self.vs_bot {
-                    "🤖 Tryb: Gracz vs Bot AI"
+                    "🤖 vs Bot AI"
                 } else {
-                    "👥 Tryb: 2 Graczy (przy 1 ekranie)"
+                    "👥 2 Graczy"
                 };
                 if ui
-                    .button(egui::RichText::new(mode_label).size(16.0))
+                    .button(egui::RichText::new(mode_label).size(15.0))
                     .clicked()
                 {
                     audio.play(Sfx::Click);
@@ -578,7 +578,7 @@ impl ChessGame {
                         Color::White => "Grasz: ⚫ Czarnymi",
                     };
                     if ui
-                        .button(egui::RichText::new(side_label).size(16.0))
+                        .button(egui::RichText::new(side_label).size(15.0))
                         .clicked()
                     {
                         audio.play(Sfx::Click);
@@ -590,39 +590,34 @@ impl ChessGame {
             } else {
                 let (online_label, online_color) = if self.waiting {
                     (
-                        "⏳ Czekam na drugiego gracza ze stolika...",
+                        "⏳ Czekam na drugiego gracza...",
                         egui::Color32::GOLD,
                     )
                 } else if self.spectator {
-                    ("👁 Tryb obserwatora — nie możesz wykonywać ruchów", egui::Color32::GOLD)
+                    ("👁 Tryb obserwatora", egui::Color32::GOLD)
                 } else {
                     match self.my_online_color {
                         Color::White => (
-                            "🌐 Tryb Online: Grasz Białymi",
+                            "🌐 Online: Grasz Białymi",
                             egui::Color32::from_rgb(80, 235, 120),
                         ),
                         Color::Black => (
-                            "🌐 Tryb Online: Grasz Czarnymi",
+                            "🌐 Online: Grasz Czarnymi",
                             egui::Color32::from_rgb(80, 235, 120),
                         ),
                     }
                 };
                 ui.label(
                     egui::RichText::new(online_label)
-                        .size(16.0)
+                        .size(15.0)
                         .strong()
                         .color(online_color),
                 );
                 if self.spectators > 0 {
                     ui.separator();
-                    let text = if self.spectators == 1 {
-                        "👁 1 osoba obserwuje grę".to_string()
-                    } else {
-                        format!("👁 {} osoby obserwują grę", self.spectators)
-                    };
                     ui.label(
-                        egui::RichText::new(text)
-                            .size(15.0)
+                        egui::RichText::new(format!("👁 {}", self.spectators))
+                            .size(14.5)
                             .strong()
                             .color(egui::Color32::GOLD),
                     );
@@ -630,7 +625,7 @@ impl ChessGame {
             }
 
             if ui
-                .button(egui::RichText::new("🔃 Obróć planszę").size(16.0))
+                .button(egui::RichText::new("🔃 Obróć").size(15.0))
                 .clicked()
             {
                 audio.play(Sfx::Click);
@@ -656,26 +651,51 @@ impl ChessGame {
             };
             ui.label(
                 egui::RichText::new(display_status)
-                    .size(19.0)
+                    .size(17.0)
                     .strong()
                     .color(status_color),
             );
         });
 
-        ui.add_space(12.0);
+        ui.add_space(10.0);
 
         let work_rect = ui.available_rect_before_wrap();
-        let panel_w = (work_rect.width() * 0.24).clamp(180.0, 280.0);
-        let max_board_w = (work_rect.width() - panel_w - 24.0).max(260.0);
-        let board_px = max_board_w.min(work_rect.height() - 8.0).max(260.0);
-        let sq_size = board_px / 8.0;
+        let is_portrait = work_rect.height() > work_rect.width() || work_rect.width() < 680.0;
 
-        let total_w = board_px + 20.0 + panel_w;
-        let start_x = work_rect.left() + ((work_rect.width() - total_w) / 2.0).max(0.0);
-        let start_y = work_rect.top() + ((work_rect.height() - board_px) / 2.0).max(0.0);
+        let (board_rect, panel_rect, sq_size) = if is_portrait {
+            let gap = 14.0;
+            let max_board = (work_rect.width() - 8.0)
+                .min(work_rect.height() * 0.66)
+                .max(220.0);
+            let sq = max_board / 8.0;
+            let bx = work_rect.center().x - max_board * 0.5;
+            let by = work_rect.top() + 4.0;
+            let b_rect = egui::Rect::from_min_size(egui::pos2(bx, by), egui::vec2(max_board, max_board));
 
-        let board_rect =
-            egui::Rect::from_min_size(egui::pos2(start_x, start_y), egui::vec2(board_px, board_px));
+            let p_top = (b_rect.bottom() + gap).min(work_rect.bottom() - 60.0);
+            let p_h = (work_rect.bottom() - p_top).max(70.0);
+            let p_rect = egui::Rect::from_min_size(egui::pos2(bx, p_top), egui::vec2(max_board, p_h));
+            (b_rect, p_rect, sq)
+        } else {
+            let panel_w = (work_rect.width() * 0.24).clamp(180.0, 280.0);
+            let max_board_w = (work_rect.width() - panel_w - 24.0).max(240.0);
+            let board_px = max_board_w.min(work_rect.height() - 8.0).max(240.0);
+            let sq = board_px / 8.0;
+
+            let total_w = board_px + 20.0 + panel_w;
+            let start_x = work_rect.left() + ((work_rect.width() - total_w) / 2.0).max(0.0);
+            let start_y = work_rect.top() + ((work_rect.height() - board_px) / 2.0).max(0.0);
+
+            let b_rect = egui::Rect::from_min_size(
+                egui::pos2(start_x, start_y),
+                egui::vec2(board_px, board_px),
+            );
+            let p_rect = egui::Rect::from_min_size(
+                egui::pos2(b_rect.right() + 20.0, b_rect.top()),
+                egui::vec2(panel_w, board_px),
+            );
+            (b_rect, p_rect, sq)
+        };
 
         ui.painter().rect_filled(
             board_rect.expand(6.0),
@@ -899,11 +919,6 @@ impl ChessGame {
             }
         }
 
-        let panel_rect = egui::Rect::from_min_size(
-            egui::pos2(board_rect.right() + 20.0, board_rect.top()),
-            egui::vec2(panel_w, board_px),
-        );
-
         let mut panel_ui = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(panel_rect)
@@ -913,12 +928,12 @@ impl ChessGame {
         egui::Frame::none()
             .fill(egui::Color32::from_rgb(38, 42, 50))
             .rounding(10.0)
-            .inner_margin(14.0)
+            .inner_margin(12.0)
             .show(&mut panel_ui, |ui| {
                 ui.set_min_size(ui.available_size());
                 ui.heading(
                     egui::RichText::new("📜 Historia ruchów")
-                        .size(18.0)
+                        .size(16.0)
                         .color(egui::Color32::WHITE),
                 );
                 ui.separator();
@@ -929,7 +944,7 @@ impl ChessGame {
                         if self.move_history.is_empty() {
                             ui.label(
                                 egui::RichText::new(
-                                    "Brak wykonanych ruchów.\nZłap figurę lub kliknij pole!",
+                                    "Brak wykonanych ruchów. Złap figurę lub kliknij pole!",
                                 )
                                 .color(egui::Color32::GRAY),
                             );
@@ -943,7 +958,7 @@ impl ChessGame {
                                 ui.label(
                                     egui::RichText::new(line)
                                         .monospace()
-                                        .size(14.0)
+                                        .size(13.5)
                                         .color(egui::Color32::LIGHT_GRAY),
                                 );
                             }

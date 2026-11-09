@@ -169,6 +169,13 @@ pub enum NetEvent {
         pair: usize,
         state: serde_json::Value,
     },
+    /// Serwer wysyła Ping do klienta – klient powinien odpowiedzieć Pong
+    Ping,
+    /// Serwer informuje o nicku innego gracza
+    PeerNick {
+        slot: usize,
+        nick: String,
+    },
 }
 
 pub struct NetClient {
@@ -197,6 +204,8 @@ pub struct NetClient {
     pub incoming_reset_pair: Option<usize>,
     ws_tx: Option<Sender<String>>,
     ws_rx: Option<Receiver<NetEvent>>,
+    /// Nicki innych graczy: slot → nick
+    pub peer_nicks: std::collections::HashMap<usize, String>,
 }
 
 impl Default for NetClient {
@@ -238,6 +247,7 @@ impl Default for NetClient {
             incoming_reset_pair: None,
             ws_tx: None,
             ws_rx: None,
+            peer_nicks: std::collections::HashMap::new(),
         };
         client.load_credentials();
         client
@@ -531,6 +541,7 @@ impl NetClient {
         self.incoming_reset_from = None;
         self.incoming_reset_game = None;
         self.incoming_reset_pair = None;
+        self.peer_nicks.clear();
     }
 
     pub fn is_spectator(&self, max_players: usize) -> bool {
@@ -601,6 +612,13 @@ impl NetClient {
         }
     }
 
+
+    /// Wysyla surowy JSON (odpowiedz Pong itp.)
+    fn send_raw(&self, json: &str) {
+        if let Some(tx) = &self.ws_tx {
+            let _ = tx.send(json.to_string());
+        }
+    }
     pub fn poll_events(&mut self) -> Vec<NetEvent> {
         let mut events = Vec::new();
         if let Some(rx) = &self.ws_rx {
@@ -618,6 +636,12 @@ impl NetClient {
                         self.room_players_count = *players_count;
                         self.room_order = order.clone();
                         self.room_focus = focus.clone();
+                        // Wyślij swój nick do serwera po dołączeniu
+                        if let Some(user) = &self.current_user {
+                            let nick = user.username.clone();
+                            let msg = format!("{{\"type\":\"SetNick\",\"nick\":\"{}\"}}", nick.replace('"', ""));
+                            self.send_raw(&msg);
+                        }
                     }
                     NetEvent::RoomState {
                         order,
@@ -651,6 +675,16 @@ impl NetClient {
                             self.incoming_reset_game = None;
                             self.incoming_reset_pair = None;
                         }
+                    }
+                    // Odpowiedz na Ping serwera
+                    NetEvent::Ping => {
+                        self.send_raw("{\"type\":\"Pong\"}");
+                        // Nie propaguj Ping dalej do gier
+                        continue;
+                    }
+                    // Zaktualizuj nick gracza w pokoju
+                    NetEvent::PeerNick { slot, nick } => {
+                        self.peer_nicks.insert(*slot, nick.clone());
                     }
                     _ => {}
                 }
