@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use tungstenite::{connect, Message};
 use sha2::{Sha256, Digest};
 
-pub const APP_VERSION: &str = "0.6.0";
+pub const APP_VERSION: &str = "0.7.0";
 
 /// Twarde limity dla wywołań HTTP. Bez nich nieosiągalny serwer blokował
 /// wątek UI na czas retransmisji TCP (minuty), a system uznawał okno za

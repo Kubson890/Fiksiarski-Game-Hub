@@ -182,30 +182,36 @@ impl BlackjackGame {
 
     pub fn ui(&mut self, ui: &mut egui::Ui, audio: &SoundManager) {
         let avail = ui.available_size();
-        let card_h = (avail.y * 0.24).clamp(115.0, 210.0);
+        let is_portrait = avail.y > avail.x || avail.x < 680.0;
+        
+        let card_h = if is_portrait {
+            (avail.y * 0.18).clamp(90.0, 150.0)
+        } else {
+            (avail.y * 0.24).clamp(115.0, 210.0)
+        };
         let card_w = card_h / 1.42;
         let card_size = egui::vec2(card_w, card_h);
-        let v_gap = (avail.y * 0.035).clamp(12.0, 40.0);
+        let v_gap = (avail.y * 0.035).clamp(10.0, 40.0);
 
         let table_frame = egui::Frame::none()
             .fill(egui::Color32::from_rgb(22, 68, 42))
             .rounding(16.0)
-            .inner_margin(24.0);
+            .inner_margin(if is_portrait { 12.0 } else { 24.0 });
 
         table_frame.show(ui, |ui| {
             ui.set_min_size(ui.available_size());
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(
                     egui::RichText::new(format!("🪙 Twoje żetony: {}", self.chips))
-                        .size(20.0)
+                        .size(18.0)
                         .strong()
                         .color(egui::Color32::GOLD),
                 );
                 ui.separator();
                 ui.label(
                     egui::RichText::new(format!("Aktualna stawka: {}", self.current_bet))
-                        .size(18.0)
+                        .size(16.0)
                         .color(egui::Color32::WHITE),
                 );
 
@@ -224,7 +230,7 @@ impl BlackjackGame {
                 let d_score = Self::calculate_score(&self.dealer_hand);
                 ui.label(
                     egui::RichText::new(format!("🎩 Krupier (Punkty: {})", d_score))
-                        .size(20.0)
+                        .size(18.0)
                         .color(egui::Color32::LIGHT_GRAY),
                 );
                 ui.add_space(8.0);
@@ -245,7 +251,7 @@ impl BlackjackGame {
             ui.vertical_centered(|ui| {
                 ui.label(
                     egui::RichText::new(&self.status_message)
-                        .size(22.0)
+                        .size(if is_portrait { 18.0 } else { 22.0 })
                         .strong()
                         .color(egui::Color32::from_rgb(255, 235, 140)),
                 );
@@ -257,7 +263,7 @@ impl BlackjackGame {
                 let p_score = Self::calculate_score(&self.player_hand);
                 ui.label(
                     egui::RichText::new(format!("🧑 Twoje karty (Punkty: {})", p_score))
-                        .size(20.0)
+                        .size(18.0)
                         .color(egui::Color32::WHITE),
                 );
                 ui.add_space(8.0);
@@ -278,17 +284,16 @@ impl BlackjackGame {
             ui.vertical_centered(|ui| {
                 match self.state {
                     GameState::Betting | GameState::Finished => {
-                        ui.horizontal(|ui| {
-                            let pad = ((ui.available_width() - 420.0) / 2.0).max(0.0);
-                            ui.add_space(pad);
-
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.spacing_mut().item_spacing.y = 8.0;
                             for &bet in &[10, 50, 100, 250] {
                                 let enabled = self.chips >= bet;
                                 if ui
                                     .add_enabled(
                                         enabled,
                                         egui::Button::new(format!("Stawka {}", bet))
-                                            .min_size(egui::vec2(85.0, 36.0)),
+                                            .min_size(egui::vec2(80.0, 36.0)),
                                     )
                                     .clicked()
                                 {
@@ -304,9 +309,9 @@ impl BlackjackGame {
                             .add_enabled(
                                 self.chips > 0,
                                 egui::Button::new(
-                                    egui::RichText::new("🃏 Rozdaj karty").size(20.0).strong(),
+                                    egui::RichText::new("🃏 Rozdaj karty").size(18.0).strong(),
                                 )
-                                .min_size(egui::vec2(220.0, 48.0)),
+                                .min_size(egui::vec2(200.0, 44.0)),
                             )
                             .clicked()
                         {
@@ -314,16 +319,15 @@ impl BlackjackGame {
                         }
                     }
                     GameState::PlayerTurn => {
-                        ui.horizontal(|ui| {
-                            let pad = ((ui.available_width() - 440.0) / 2.0).max(0.0);
-                            ui.add_space(pad);
-
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            ui.spacing_mut().item_spacing.y = 8.0;
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        egui::RichText::new("➕ Dobierz (Hit)").size(18.0),
+                                        egui::RichText::new("➕ Dobierz (Hit)").size(16.0),
                                     )
-                                    .min_size(egui::vec2(135.0, 44.0)),
+                                    .min_size(egui::vec2(120.0, 40.0)),
                                 )
                                 .clicked()
                             {
@@ -333,9 +337,9 @@ impl BlackjackGame {
                             if ui
                                 .add(
                                     egui::Button::new(
-                                        egui::RichText::new("✋ Pasuj (Stand)").size(18.0),
+                                        egui::RichText::new("✋ Pasuj (Stand)").size(16.0),
                                     )
-                                    .min_size(egui::vec2(135.0, 44.0)),
+                                    .min_size(egui::vec2(120.0, 40.0)),
                                 )
                                 .clicked()
                             {
@@ -349,9 +353,9 @@ impl BlackjackGame {
                                 .add_enabled(
                                     can_double,
                                     egui::Button::new(
-                                        egui::RichText::new("✖2 Podwój (Double)").size(18.0),
+                                        egui::RichText::new("✖2 Podwój (Double)").size(16.0),
                                     )
-                                    .min_size(egui::vec2(145.0, 44.0)),
+                                    .min_size(egui::vec2(120.0, 40.0)),
                                 )
                                 .clicked()
                             {

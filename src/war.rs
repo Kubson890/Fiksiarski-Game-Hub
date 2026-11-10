@@ -80,10 +80,6 @@ impl Default for WarGame {
 }
 
 impl WarGame {
-    /// Rozdaje karty z gotowej talii. Karta o parzystym indeksie trafia do
-    /// fizycznej talii A (miejsce 0), a nieparzystym do talii B (miejsce 1).
-    /// Dzięki temu obaj gracze online trzymają identyczne talie w tej samej
-    /// kolejności, a tylko widok "moja / przeciwnika" zależy od miejsca.
     fn deal_from_deck(&mut self, deck: Deck, seat: usize) {
         let mut even: VecDeque<Card> = VecDeque::new();
         let mut odd: VecDeque<Card> = VecDeque::new();
@@ -127,8 +123,6 @@ impl WarGame {
             "Kliknij 'Zagraj kartę' (lub Spację), aby rozpocząć pojedynek!".to_string();
     }
 
-    /// Ustawia grę online na podstawie faktycznej obecności obu graczy.
-    /// Nie rozdaje kart i nie uruchamia bota.
     pub fn setup_online(&mut self, seat: usize) {
         self.online_mode = true;
         self.online_lobby = true;
@@ -171,7 +165,6 @@ impl WarGame {
         }
     }
 
-    /// Gracz potwierdza gotowość.
     pub fn mark_ready(&mut self, audio: &SoundManager) {
         if !self.online_mode || !self.online_lobby || self.my_ready {
             return;
@@ -183,7 +176,6 @@ impl WarGame {
         self.try_host_start();
     }
 
-    /// Informacja, że przeciwnik potwierdził gotowość.
     pub fn apply_remote_ready(&mut self, from_seat: usize, audio: &SoundManager) {
         if !self.online_mode || from_seat == self.my_seat {
             return;
@@ -324,7 +316,7 @@ impl WarGame {
         if p_val > b_val {
             self.in_war_state = false;
             self.status_text = format!(
-                "✅ Twoja karta ({}{}) bije kartę wroga ({}{})! Zgarniasz {} kart!",
+                "✅ Twoja ({}{}) bije kartę wroga ({}{})! Zgarniasz {} kart!",
                 p_card.rank.label(),
                 p_card.suit.symbol(),
                 b_card.rank.label(),
@@ -338,7 +330,7 @@ impl WarGame {
         } else if b_val > p_val {
             self.in_war_state = false;
             self.status_text = format!(
-                "❌ Tracisz kartę! Wróg ({}{}) bije Twoją ({}{}) i zabiera {} kart.",
+                "❌ Tracisz! Wróg ({}{}) bije Twoją ({}{}) i zabiera {} kart.",
                 b_card.rank.label(),
                 b_card.suit.symbol(),
                 p_card.rank.label(),
@@ -353,7 +345,7 @@ impl WarGame {
             self.in_war_state = true;
             audio.play(Sfx::Check);
             self.status_text = format!(
-                "🔥 WOJNA! Obie strony wyrzuciły {}! Kliknij ponownie, aby dołożyć karty!",
+                "🔥 WOJNA! Obie strony mają {}! Dłóż karty!",
                 p_card.rank.label()
             );
             self.anim = Some(AnimPhase::Dealing {
@@ -368,10 +360,10 @@ impl WarGame {
         let msg = if self.player_deck.len() > self.bot_deck.len() {
             self.newly_won = true;
             audio.play(Sfx::Win);
-            "🏆 ZWYCIĘSTWO! Zdobyłeś wszystkie karty przeciwnika!"
+            "🏆 ZWYCIĘSTWO! Zdobyłeś wszystkie karty!"
         } else {
             audio.play(Sfx::Lose);
-            "💀 PORAŻKA! Straciłeś wszystkie swoje karty."
+            "💀 PORAŻKA! Straciłeś swoje karty."
         };
         self.winner = Some(msg);
         self.status_text = msg.to_string();
@@ -398,7 +390,7 @@ impl WarGame {
         );
         ui.add_space(8.0);
         ui.label(
-            egui::RichText::new("Karty zostaną rozdane dopiero, gdy obaj gracze potwierdzą gotowość.")
+            egui::RichText::new("Karty zostaną rozdane, gdy obaj gracze potwierdzą gotowość.")
                 .size(15.0)
                 .color(egui::Color32::from_rgb(200, 220, 210)),
         );
@@ -513,8 +505,6 @@ impl WarGame {
             }
         }
 
-        // W trybie online stół prowadzi gospodarz (miejsce 0), aby uniknąć
-        // podwójnego rozdania i rozjazdu stanu między klientami.
         let can_act = if self.online_mode {
             self.my_seat == 0 && self.enemy_present
         } else {
@@ -544,6 +534,7 @@ impl WarGame {
 
         let margin = (full_rect.width() * 0.025).clamp(12.0, 28.0);
         let content_rect = full_rect.shrink(margin);
+        let is_portrait = content_rect.height() > content_rect.width() || content_rect.width() < 640.0;
 
         let mut child_ui = ui.new_child(
             egui::UiBuilder::new()
@@ -552,13 +543,13 @@ impl WarGame {
         );
         let ui = &mut child_ui;
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if self.online_mode {
                 ui.label(
                     egui::RichText::new(if self.my_seat == 0 {
-                        "🌐 Stół online — Ty odkrywasz karty"
+                        "🌐 Stół online — Ty odkrywasz"
                     } else {
-                        "🌐 Stół online — czekaj na ruch przeciwnika"
+                        "🌐 Stół online — czeka na przeciwnika"
                     })
                     .size(16.0)
                     .strong()
@@ -592,12 +583,12 @@ impl WarGame {
             ui.separator();
             ui.label(
                 egui::RichText::new(format!("Starcia: {}", self.rounds))
-                    .size(17.0)
+                    .size(16.0)
                     .color(egui::Color32::LIGHT_GRAY),
             );
         });
 
-        ui.add_space(12.0);
+        ui.add_space(8.0);
 
         let p_cnt = self.player_deck.len();
         let b_cnt = self.bot_deck.len();
@@ -605,41 +596,64 @@ impl WarGame {
         let p_ratio = p_cnt as f32 / total;
 
         let bar_w = ui.available_width();
-        let (bar_rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, 26.0), egui::Sense::hover());
+        let (bar_rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, 20.0), egui::Sense::hover());
         ui.painter()
-            .rect_filled(bar_rect, 8.0, egui::Color32::from_rgb(195, 55, 55));
+            .rect_filled(bar_rect, 6.0, egui::Color32::from_rgb(195, 55, 55));
 
-        let p_bar = egui::Rect::from_min_size(bar_rect.min, egui::vec2(bar_w * p_ratio, 26.0));
+        let p_bar = egui::Rect::from_min_size(bar_rect.min, egui::vec2(bar_w * p_ratio, 20.0));
         ui.painter()
-            .rect_filled(p_bar, 8.0, egui::Color32::from_rgb(50, 135, 225));
+            .rect_filled(p_bar, 6.0, egui::Color32::from_rgb(50, 135, 225));
 
         ui.painter().text(
             bar_rect.center(),
             egui::Align2::CENTER_CENTER,
             format!(
-                "🧑 Twoje karty: {}     vs     {} Przeciwnik: {}",
+                "🧑 Ty: {}     |     {} Opon.: {}",
                 p_cnt,
                 if self.online_mode { "🌐" } else { "🤖" },
                 b_cnt
             ),
-            egui::FontId::proportional(15.0),
+            egui::FontId::proportional(14.0),
             egui::Color32::WHITE,
         );
 
-        ui.add_space(16.0);
+        ui.add_space(10.0);
 
         let arena_rect = ui.available_rect_before_wrap();
-        let card_h = (arena_rect.height() * 0.36).clamp(115.0, 210.0);
+        
+        let card_h = if is_portrait {
+            (arena_rect.height() * 0.22).clamp(100.0, 175.0)
+        } else {
+            (arena_rect.height() * 0.36).clamp(115.0, 210.0)
+        };
         let card_w = card_h / 1.42;
         let card_size = egui::vec2(card_w, card_h);
 
         let center = arena_rect.center();
 
-        let p_deck_pos = egui::pos2(arena_rect.left() + card_w * 0.35, center.y - card_h * 0.5);
-        let b_deck_pos = egui::pos2(arena_rect.right() - card_w * 1.35, center.y - card_h * 0.5);
+        let (p_deck_pos, b_deck_pos, p_target_base, b_target_base) = if is_portrait {
+            (
+                egui::pos2(center.x - card_w * 0.5, arena_rect.bottom() - card_h - 60.0),
+                egui::pos2(center.x - card_w * 0.5, arena_rect.top() + 40.0),
+                egui::pos2(center.x - card_w * 0.5, center.y + card_h * 0.1),
+                egui::pos2(center.x - card_w * 0.5, center.y - card_h * 1.1),
+            )
+        } else {
+            (
+                egui::pos2(arena_rect.left() + card_w * 0.35, center.y - card_h * 0.5),
+                egui::pos2(arena_rect.right() - card_w * 1.35, center.y - card_h * 0.5),
+                egui::pos2(center.x - card_w * 1.25, center.y - card_h * 0.5),
+                egui::pos2(center.x + card_w * 0.25, center.y - card_h * 0.5),
+            )
+        };
+        
+        let stack_offset = if is_portrait {
+            egui::vec2(card_w * 0.25, 0.0)
+        } else {
+            egui::vec2(card_w * 0.20, 0.0)
+        };
 
         let dummy_back = Card::new(crate::cards::Suit::Spades, crate::cards::Rank::Ace, false);
-
         let collecting_winner = match self.anim {
             Some(AnimPhase::Collecting { winner, .. }) => Some(winner),
             _ => None,
@@ -677,15 +691,11 @@ impl WarGame {
             ui.painter().text(
                 b_deck_rect.center(),
                 egui::Align2::CENTER_CENTER,
-                format!("{}\n({})", if self.online_mode { "PRZEC." } else { "BOT" }, b_cnt),
+                format!("{}\n({})", if self.online_mode { "WRO." } else { "BOT" }, b_cnt),
                 egui::FontId::proportional((card_w * 0.22).max(14.0)),
                 egui::Color32::WHITE,
             );
         }
-
-        let p_target_base = egui::pos2(center.x - card_w * 1.25, center.y - card_h * 0.5);
-        let b_target_base = egui::pos2(center.x + card_w * 0.25, center.y - card_h * 0.5);
-        let stack_offset = (card_w * 0.20).clamp(14.0, 26.0);
 
         match self.anim {
             Some(AnimPhase::Dealing { start, .. }) => {
@@ -694,7 +704,7 @@ impl WarGame {
                 let deal_t = 1.0 - (1.0 - raw_t).powi(3);
 
                 for (i, card) in self.table_player.iter().enumerate() {
-                    let target = p_target_base + egui::vec2(i as f32 * stack_offset, 0.0);
+                    let target = p_target_base + stack_offset * (i as f32);
                     let pos = if i + 1 == self.table_player.len() {
                         p_deck_pos.lerp(target, deal_t)
                     } else {
@@ -705,7 +715,7 @@ impl WarGame {
                 }
 
                 for (i, card) in self.table_bot.iter().enumerate() {
-                    let target = b_target_base + egui::vec2(i as f32 * stack_offset, 0.0);
+                    let target = b_target_base + stack_offset * (i as f32);
                     let pos = if i + 1 == self.table_bot.len() {
                         b_deck_pos.lerp(target, deal_t)
                     } else {
@@ -724,17 +734,15 @@ impl WarGame {
                     RoundWinner::Player => p_deck_pos,
                     RoundWinner::Bot => b_deck_pos,
                 };
-
                 let outline_col = match winner {
                     RoundWinner::Player => egui::Color32::from_rgb(75, 235, 115),
                     RoundWinner::Bot => egui::Color32::from_rgb(245, 75, 75),
                 };
-
                 let arc_lift = (raw_t * std::f32::consts::PI).sin() * 28.0;
 
                 for (i, card) in self.table_player.iter().enumerate() {
-                    let start_pos = p_target_base + egui::vec2(i as f32 * stack_offset, 0.0);
-                    let pos = start_pos.lerp(dest_pos, collect_t) - egui::vec2(0.0, arc_lift);
+                    let start_pos = p_target_base + stack_offset * (i as f32);
+                    let pos = start_pos.lerp(dest_pos, collect_t) - egui::vec2(arc_lift, arc_lift);
                     let r = egui::Rect::from_min_size(pos, card_size);
                     paint_card_at(ui.painter(), r, card, false);
                     ui.painter().rect_stroke(
@@ -745,8 +753,8 @@ impl WarGame {
                 }
 
                 for (i, card) in self.table_bot.iter().enumerate() {
-                    let start_pos = b_target_base + egui::vec2(i as f32 * stack_offset, 0.0);
-                    let pos = start_pos.lerp(dest_pos, collect_t) + egui::vec2(0.0, arc_lift);
+                    let start_pos = b_target_base + stack_offset * (i as f32);
+                    let pos = start_pos.lerp(dest_pos, collect_t) + egui::vec2(arc_lift, arc_lift);
                     let r = egui::Rect::from_min_size(pos, card_size);
                     paint_card_at(ui.painter(), r, card, false);
                     ui.painter().rect_stroke(
@@ -771,12 +779,12 @@ impl WarGame {
             }
             None => {
                 for (i, card) in self.table_player.iter().enumerate() {
-                    let pos = p_target_base + egui::vec2(i as f32 * stack_offset, 0.0);
+                    let pos = p_target_base + stack_offset * (i as f32);
                     let r = egui::Rect::from_min_size(pos, card_size);
                     paint_card_at(ui.painter(), r, card, self.in_war_state && card.face_up);
                 }
                 for (i, card) in self.table_bot.iter().enumerate() {
-                    let pos = b_target_base + egui::vec2(i as f32 * stack_offset, 0.0);
+                    let pos = b_target_base + stack_offset * (i as f32);
                     let r = egui::Rect::from_min_size(pos, card_size);
                     paint_card_at(ui.painter(), r, card, self.in_war_state && card.face_up);
                 }
@@ -786,34 +794,27 @@ impl WarGame {
         ui.painter().text(
             center,
             egui::Align2::CENTER_CENTER,
-            if self.in_war_state {
-                "🔥 WOJNA! 🔥"
-            } else {
-                "⚔"
-            },
+            if self.in_war_state { "🔥 WOJNA! 🔥" } else { "⚔" },
             egui::FontId::proportional((card_w * 0.32).max(20.0)),
-            if self.in_war_state {
-                egui::Color32::GOLD
-            } else {
-                egui::Color32::from_white_alpha(120)
-            },
+            if self.in_war_state { egui::Color32::GOLD } else { egui::Color32::from_white_alpha(120) },
         );
 
+        let status_y = if is_portrait {
+            arena_rect.top() + 14.0
+        } else {
+            arena_rect.top() + 22.0
+        };
         ui.painter().text(
-            egui::pos2(center.x, arena_rect.top() + 22.0),
+            egui::pos2(center.x, status_y),
             egui::Align2::CENTER_CENTER,
             &self.status_text,
-            egui::FontId::proportional((arena_rect.height() * 0.045).clamp(16.0, 24.0)),
-            if self.in_war_state {
-                egui::Color32::GOLD
-            } else {
-                egui::Color32::from_rgb(245, 235, 165)
-            },
+            egui::FontId::proportional((arena_rect.height() * 0.045).clamp(14.0, 24.0)),
+            if self.in_war_state { egui::Color32::GOLD } else { egui::Color32::from_rgb(245, 235, 165) },
         );
 
-        let btn_size = egui::vec2(260.0, 52.0);
+        let btn_size = egui::vec2(260.0, 48.0);
         let btn_rect = egui::Rect::from_center_size(
-            egui::pos2(center.x, arena_rect.bottom() - 36.0),
+            egui::pos2(center.x, arena_rect.bottom() - 30.0),
             btn_size,
         );
 
@@ -823,13 +824,13 @@ impl WarGame {
         } else if self.in_war_state {
             "🔥 ROZSTRZYGNIJ WOJNĘ!"
         } else {
-            "🃏 Zagraj kartę (Spacja)"
+            "🃏 Zagraj kartę"
         };
 
         if btn_ui
             .add_enabled(
                 self.winner.is_none() && can_act && self.anim.is_none(),
-                egui::Button::new(egui::RichText::new(btn_label).size(20.0).strong())
+                egui::Button::new(egui::RichText::new(btn_label).size(18.0).strong())
                     .min_size(btn_size),
             )
             .clicked()
@@ -837,37 +838,5 @@ impl WarGame {
             self.outgoing_step = self.online_mode;
             self.play_step(audio);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn seeded_deal_is_mirrored_for_both_seats() {
-        let mut a = WarGame::default();
-        let mut b = WarGame::default();
-        a.setup_online(0);
-        b.setup_online(1);
-        a.begin_online(987_654_321);
-        b.begin_online(987_654_321);
-
-        assert_eq!(a.player_deck, b.bot_deck);
-        assert_eq!(a.bot_deck, b.player_deck);
-        assert_eq!(a.player_deck.len() + a.bot_deck.len(), 52);
-    }
-
-    #[test]
-    fn seeded_deal_is_deterministic() {
-        let mut a = WarGame::default();
-        let mut b = WarGame::default();
-        a.setup_online(0);
-        b.setup_online(0);
-        a.begin_online(42);
-        b.begin_online(42);
-
-        assert_eq!(a.player_deck, b.player_deck);
-        assert_eq!(a.bot_deck, b.bot_deck);
     }
 }

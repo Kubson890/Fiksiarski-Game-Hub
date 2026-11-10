@@ -274,9 +274,9 @@ impl SolitaireGame {
         );
         let ui = &mut child_ui;
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
-                .button(egui::RichText::new("🔄 Nowe rozdanie").size(16.0))
+                .button(egui::RichText::new("🔄 Nowe rozdanie").size(15.0))
                 .clicked()
             {
                 audio.play(Sfx::CardSlide);
@@ -285,16 +285,16 @@ impl SolitaireGame {
             ui.separator();
             ui.label(
                 egui::RichText::new(format!("Ruchy: {}", self.moves))
-                    .size(18.0)
+                    .size(16.0)
                     .strong()
                     .color(egui::Color32::WHITE),
             );
             ui.separator();
             ui.label(
                 egui::RichText::new(
-                    "🖐 Przeciągnij i upuść karty (LPM)   |   ⚡ Szybki ruch z animacją (PPM / Dwuklik)",
+                    "LPM chwyta, PPM (podwójny klik na telefonie) przenosi automatycznie",
                 )
-                .size(14.0)
+                .size(13.5)
                 .color(egui::Color32::LIGHT_GRAY),
             );
 
@@ -302,21 +302,20 @@ impl SolitaireGame {
                 ui.separator();
                 ui.label(
                     egui::RichText::new("🏆 WYGRANA!")
-                        .size(20.0)
+                        .size(18.0)
                         .strong()
                         .color(egui::Color32::GOLD),
                 );
             }
         });
 
-        ui.add_space(10.0);
+        ui.add_space(8.0);
 
         let board_rect = ui.available_rect_before_wrap();
-        let col_spacing = (board_rect.width() * 0.018).clamp(8.0, 28.0);
+        let col_spacing = (board_rect.width() * 0.015).max(4.0);
 
-        let width_from_w = (board_rect.width() - col_spacing * 6.0) / 7.0;
-        let width_from_h = (board_rect.height() / 3.4) / 1.42;
-        let card_w = width_from_w.min(width_from_h).max(55.0);
+        // Karta jest ułamkiem dostępnej przestrzeni poziomej.
+        let card_w = ((board_rect.width() - col_spacing * 6.0) / 7.0).max(10.0);
         let card_h = card_w * 1.42;
         let card_size = egui::vec2(card_w, card_h);
 
@@ -339,7 +338,7 @@ impl SolitaireGame {
                 stock_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 format!("{}", self.stock.len()),
-                egui::FontId::proportional((card_w * 0.24).max(14.0)),
+                egui::FontId::proportional((card_w * 0.24).max(12.0)),
                 egui::Color32::WHITE,
             );
         } else {
@@ -489,8 +488,8 @@ impl SolitaireGame {
             let x = col_x(col_idx);
             let col_len = self.tableau[col_idx].len();
 
-            let default_face_up_step = (card_h * 0.22).clamp(20.0, 36.0);
-            let default_face_down_step = (card_h * 0.13).clamp(12.0, 22.0);
+            let default_face_up_step = (card_h * 0.22).clamp(16.0, 36.0);
+            let default_face_down_step = (card_h * 0.13).clamp(10.0, 22.0);
 
             let total_default_steps: f32 = self.tableau[col_idx]
                 .iter()
@@ -687,7 +686,7 @@ impl SolitaireGame {
     }
 
     fn draw_empty_slot(painter: &egui::Painter, rect: egui::Rect, hint: &str, card_w: f32) {
-        let scale = (card_w / 95.0).max(0.5);
+        let scale = (card_w / 95.0).max(0.4);
         painter.rect(
             rect,
             8.0 * scale,
@@ -699,7 +698,7 @@ impl SolitaireGame {
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 hint,
-                egui::FontId::proportional((28.0 * scale).max(14.0)),
+                egui::FontId::proportional((28.0 * scale).max(12.0)),
                 egui::Color32::from_white_alpha(55),
             );
         }
