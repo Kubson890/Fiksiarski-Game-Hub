@@ -348,7 +348,7 @@ def homepage():
         }}
         .github-link:hover {{ border-color: #89b4fa; background: #1e1e2e; }}
         .version-badge {{
-            margin-top: 32px;
+            margin: 32px auto 0;
             background: #1e1e2e;
             border: 1px solid #313244;
             border-radius: 10px;
@@ -356,7 +356,7 @@ def homepage():
             font-size: .9rem;
             color: #a6adc8;
             max-width: 560px;
-            text-align: left;
+            text-align: center;
         }}
         .version-badge b {{ color: #a6e3a1; }}
         footer {{
