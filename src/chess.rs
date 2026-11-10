@@ -39,6 +39,13 @@ pub struct ChessGame {
     pub waiting: bool,
     /// Ilu obserwatorów aktualnie patrzy na partię (do ikony 👁).
     pub spectators: usize,
+    /// Poczekalnia online — obaj gracze muszą potwierdzić gotowość przed startem.
+    pub online_lobby: bool,
+    pub my_ready: bool,
+    pub opponent_ready: bool,
+    pub outgoing_ready: bool,
+    pub enemy_present: bool,
+    start_sent: bool,
 }
 
 impl Default for ChessGame {
@@ -62,6 +69,12 @@ impl Default for ChessGame {
             spectator: false,
             waiting: false,
             spectators: 0,
+            online_lobby: false,
+            my_ready: false,
+            opponent_ready: false,
+            outgoing_ready: false,
+            enemy_present: false,
+            start_sent: false,
         };
         game.update_status();
         game
@@ -88,13 +101,18 @@ impl ChessGame {
         // `player_idx` to teraz miejsce w obrębie stolika (0/1), a nie pokoju.
         self.spectator = false;
         self.waiting = false;
+        self.online_lobby = true;
+        self.my_ready = false;
+        self.opponent_ready = false;
+        self.outgoing_ready = false;
+        self.start_sent = false;
         self.my_online_color = if player_idx == 1 {
             Color::Black
         } else {
             Color::White
         };
         self.flipped = self.my_online_color == Color::Black;
-        self.new_game();
+        // Nie wywołujemy new_game() — czekamy na potwierdzenie gotowości obu graczy
     }
 
     /// Ustawia rolę przy stole: gracz / obserwator / oczekujący na partnera.
@@ -117,6 +135,52 @@ impl ChessGame {
                 self.update_status();
             }
         }
+    }
+
+    pub fn set_enemy_present(&mut self, present: bool) {
+        if self.enemy_present != present {
+            self.enemy_present = present;
+            if !present {
+                self.opponent_ready = false;
+                self.my_ready = false;
+            }
+        }
+    }
+
+    pub fn mark_ready(&mut self, audio: &SoundManager) {
+        if !self.online_mode || !self.online_lobby || self.my_ready {
+            return;
+        }
+        audio.play(Sfx::Click);
+        self.my_ready = true;
+        self.outgoing_ready = true;
+        if self.my_ready && self.opponent_ready {
+            self.start_game();
+        }
+    }
+
+    pub fn apply_remote_ready(&mut self, from_seat: usize, audio: &SoundManager) {
+        if !self.online_mode || !self.online_lobby {
+            return;
+        }
+        let my_seat_num = if self.my_online_color == Color::White { 0 } else { 1 };
+        if from_seat == my_seat_num {
+            return; // ignoruj własne echo
+        }
+        if !self.opponent_ready {
+            audio.play(Sfx::Check);
+        }
+        self.opponent_ready = true;
+        if self.my_ready && self.opponent_ready {
+            self.start_game();
+        }
+    }
+
+    pub fn start_game(&mut self) {
+        self.online_lobby = false;
+        self.my_ready = false;
+        self.opponent_ready = false;
+        self.new_game();
     }
 
     /// Stan partii wystarczający do odtworzenia planszy u obserwatora
@@ -499,7 +563,120 @@ impl ChessGame {
         )
     }
 
+    fn render_online_lobby(&mut self, ui: &mut egui::Ui, audio: &SoundManager) {
+        let full_rect = ui.available_rect_before_wrap();
+        ui.painter()
+            .rect_filled(full_rect, 12.0, egui::Color32::from_rgb(24, 30, 26));
+
+        let mut child_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(full_rect.shrink(18.0))
+                .layout(egui::Layout::top_down(egui::Align::Center)),
+        );
+        let ui = &mut child_ui;
+
+        ui.add_space(24.0);
+        ui.label(
+            egui::RichText::new("♟ Szachy — Stolik online")
+                .size(26.0)
+                .strong()
+                .color(egui::Color32::WHITE),
+        );
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Partia rozpocznie się, gdy obaj gracze potwierdzą gotowość.")
+                .size(15.0)
+                .color(egui::Color32::from_rgb(190, 210, 195)),
+        );
+        ui.add_space(20.0);
+
+        let my_color_name = if self.my_online_color == Color::White {
+            "Białe ♙"
+        } else {
+            "Czarne ♟"
+        };
+        let opp_color_name = if self.my_online_color == Color::White {
+            "Czarne ♟"
+        } else {
+            "Białe ♙"
+        };
+
+        let my_label = if self.my_ready {
+            "✅ Gotowy"
+        } else {
+            "⏳ Niegotowy"
+        };
+        let opp_label = if !self.enemy_present {
+            "❌ Brak przeciwnika"
+        } else if self.opponent_ready {
+            "✅ Gotowy"
+        } else {
+            "⏳ Niegotowy"
+        };
+
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(34, 44, 38))
+            .rounding(10.0)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.set_width((full_rect.width() - 100.0).clamp(200.0, 380.0));
+                ui.label(
+                    egui::RichText::new(format!("🧑 Ty ({}): {}", my_color_name, my_label))
+                        .size(17.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                );
+            });
+        ui.add_space(8.0);
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(34, 44, 38))
+            .rounding(10.0)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.set_width((full_rect.width() - 100.0).clamp(200.0, 380.0));
+                ui.label(
+                    egui::RichText::new(format!("🌐 Przeciwnik ({}): {}", opp_color_name, opp_label))
+                        .size(17.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                );
+            });
+
+        ui.add_space(20.0);
+        if !self.enemy_present {
+            ui.label(
+                egui::RichText::new("⏳ Czekam na drugiego gracza ze stolika...")
+                    .size(16.0)
+                    .color(egui::Color32::GOLD),
+            );
+        } else if self.my_ready {
+            ui.label(
+                egui::RichText::new("⏳ Czekam na gotowość przeciwnika...")
+                    .size(16.0)
+                    .color(egui::Color32::GOLD),
+            );
+        } else {
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("✅ Jestem gotowy").size(19.0).strong(),
+                    )
+                    .min_size(egui::vec2(260.0, 48.0)),
+                )
+                .clicked()
+            {
+                self.mark_ready(audio);
+            }
+        }
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, audio: &SoundManager) {
+        // Poczekalnia online — pokazujemy ekran gotowości zamiast planszy
+        if self.online_mode && self.online_lobby {
+            self.render_online_lobby(ui, audio);
+            return;
+        }
+
         let now = Instant::now();
 
         let mut anim_in_progress = false;

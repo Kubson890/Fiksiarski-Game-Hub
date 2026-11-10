@@ -183,15 +183,15 @@ impl BlackjackGame {
     pub fn ui(&mut self, ui: &mut egui::Ui, audio: &SoundManager) {
         let avail = ui.available_size();
         let is_portrait = avail.y > avail.x || avail.x < 680.0;
-        
+
         let card_h = if is_portrait {
-            (avail.y * 0.18).clamp(90.0, 150.0)
+            (avail.y * 0.22).clamp(110.0, 180.0)
         } else {
-            (avail.y * 0.24).clamp(115.0, 210.0)
+            (avail.y * 0.28).clamp(140.0, 240.0)
         };
         let card_w = card_h / 1.42;
         let card_size = egui::vec2(card_w, card_h);
-        let v_gap = (avail.y * 0.035).clamp(10.0, 40.0);
+        let v_gap = (avail.y * 0.045).clamp(12.0, 55.0);
 
         let table_frame = egui::Frame::none()
             .fill(egui::Color32::from_rgb(22, 68, 42))
@@ -201,6 +201,7 @@ impl BlackjackGame {
         table_frame.show(ui, |ui| {
             ui.set_min_size(ui.available_size());
 
+            // Top bar: chips + bet
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     egui::RichText::new(format!("🪙 Twoje żetony: {}", self.chips))
@@ -224,8 +225,15 @@ impl BlackjackGame {
                 }
             });
 
-            ui.add_space(v_gap * 0.6);
+            // Calculate remaining space and add top padding to center content
+            let used_top = 36.0; // approx top bar height
+            let content_h = card_h * 2.0 + 24.0 + v_gap * 4.0 + 60.0;
+            let remaining = (avail.y - used_top - content_h - 48.0).max(0.0);
+            ui.add_space(remaining / 2.0);
 
+            ui.add_space(v_gap * 0.5);
+
+            // Dealer section
             ui.vertical_centered(|ui| {
                 let d_score = Self::calculate_score(&self.dealer_hand);
                 ui.label(
@@ -248,6 +256,7 @@ impl BlackjackGame {
 
             ui.add_space(v_gap);
 
+            // Status message
             ui.vertical_centered(|ui| {
                 ui.label(
                     egui::RichText::new(&self.status_message)
@@ -259,6 +268,7 @@ impl BlackjackGame {
 
             ui.add_space(v_gap);
 
+            // Player section
             ui.vertical_centered(|ui| {
                 let p_score = Self::calculate_score(&self.player_hand);
                 ui.label(
@@ -281,6 +291,7 @@ impl BlackjackGame {
 
             ui.add_space(v_gap);
 
+            // Buttons
             ui.vertical_centered(|ui| {
                 match self.state {
                     GameState::Betting | GameState::Finished => {

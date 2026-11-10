@@ -758,6 +758,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     "CategoriesStart", "CategoriesStop", "CategoriesSubmit",
                     "CategoriesVote",
                     "WarReady", "WarStart", "WarStep",
+                    "ChessReady", "BattleshipReady",
                     "ResetRequest", "ResetApproved", "ResetDeclined",
                     "StateRequest", "GameState", "FocusGame",
                     "SetNick", "Pong",
@@ -827,6 +828,8 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 "WarReady": "war",
                 "WarStart": "war",
                 "WarStep": "war",
+                "ChessReady": "chess",
+                "BattleshipReady": "battleship",
             }
 
             pair_event_game = PAIR_EVENT_GAMES.get(event_type)
@@ -942,7 +945,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 game = str(parsed.get("game", ""))
                 if game in ROOM_GAMES:
                     recipients = _slots_with_focus(room_id, game)
-            elif pair_event_game == "war":
+            elif pair_event_game == "war" or event_type in {"ChessReady", "BattleshipReady"}:
                 recipients = [s for s in (pair * 2, pair * 2 + 1) if s in rooms[room_id]]
 
             if recipients is None:

@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use tungstenite::{connect, Message};
 use sha2::{Sha256, Digest};
 
-pub const APP_VERSION: &str = "0.7.0";
+pub const APP_VERSION: &str = "0.8.0";
 
 /// Twarde limity dla wywołań HTTP. Bez nich nieosiągalny serwer blokował
 /// wątek UI na czas retransmisji TCP (minuty), a system uznawał okno za
@@ -158,6 +158,22 @@ pub enum NetEvent {
     WarReady {
         #[serde(default)]
         from_seat: usize,
+        #[serde(default)]
+        pair: usize,
+    },
+    /// Gracz potwierdza gotowość do partii szachów online.
+    ChessReady {
+        #[serde(default)]
+        from_seat: usize,
+        #[serde(default)]
+        pair: usize,
+    },
+    /// Gracz potwierdza gotowość do bitwy morskiej online.
+    BattleshipReady {
+        #[serde(default)]
+        from_seat: usize,
+        #[serde(default)]
+        pair: usize,
     },
     /// Host stołu wysyła ziarno, z którego obaj gracze tasują talię.
     WarStart {

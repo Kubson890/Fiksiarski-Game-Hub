@@ -270,11 +270,17 @@ impl GameHubApp {
             }
             match game {
                 "chess" => {
-                    self.chess.set_online_role(false, false);
+                    self.chess.set_enemy_present(true);
+                    if !self.chess.online_lobby {
+                        self.chess.set_online_role(false, false);
+                    }
                     self.chess.spectators = count;
                 }
                 "battleship" => {
-                    self.battleship.set_online_role(false, false);
+                    self.battleship.set_enemy_present(true);
+                    if !self.battleship.online_lobby {
+                        self.battleship.set_online_role(false, false);
+                    }
                     self.battleship.spectators = count;
                 }
                 _ => {}
@@ -289,10 +295,12 @@ impl GameHubApp {
             let new_watch = self.last_watched_pair.as_ref() != Some(&watch_key);
             match game {
                 "chess" => {
+                    self.chess.online_lobby = false;
                     self.chess.set_online_role(true, false);
                     self.chess.spectators = count;
                 }
                 "battleship" => {
+                    self.battleship.online_lobby = false;
                     self.battleship.set_online_role(true, false);
                     self.battleship.spectators = count;
                 }
@@ -312,11 +320,23 @@ impl GameHubApp {
             }
             match game {
                 "chess" => {
-                    self.chess.set_online_role(false, true);
+                    if !self.chess.online_mode {
+                        self.chess.setup_online(seat);
+                    }
+                    self.chess.set_enemy_present(false);
+                    if !self.chess.online_lobby {
+                        self.chess.set_online_role(false, true);
+                    }
                     self.chess.spectators = count;
                 }
                 "battleship" => {
-                    self.battleship.set_online_role(false, true);
+                    if !self.battleship.online_mode {
+                        self.battleship.setup_online(seat);
+                    }
+                    self.battleship.set_enemy_present(false);
+                    if !self.battleship.online_lobby {
+                        self.battleship.set_online_role(false, true);
+                    }
                     self.battleship.spectators = count;
                 }
                 _ => {}
@@ -403,6 +423,7 @@ impl GameHubApp {
 
     fn leave_online_games(&mut self) {
         self.chess.online_mode = false;
+        self.chess.online_lobby = false;
         self.chess.spectator = false;
         self.chess.waiting = false;
         self.ludo.online_mode = false;
@@ -543,6 +564,9 @@ impl eframe::App for GameHubApp {
                         if self.current_screen == Screen::Chess
                             && self.net.playing_pair("chess") == Some(pair)
                         {
+                            if self.chess.online_lobby {
+                                self.chess.start_game();
+                            }
                             self.chess.apply_remote_move(from, to, &self.audio);
                         }
                     }
@@ -603,9 +627,19 @@ impl eframe::App for GameHubApp {
                         self.categories
                             .apply_remote_vote(from_room_seat, votes, &self.audio);
                     }
-                    NetEvent::WarReady { from_seat } => {
-                        if self.current_screen == Screen::War && self.war.online_mode {
+                    NetEvent::WarReady { from_seat, pair } => {
+                        if self.current_screen == Screen::War && self.war.online_mode && (pair == 0 || pair == self.net.my_pair()) {
                             self.war.apply_remote_ready(from_seat, &self.audio);
+                        }
+                    }
+                    NetEvent::ChessReady { from_seat, pair } => {
+                        if self.current_screen == Screen::Chess && self.chess.online_mode && pair == self.net.my_pair() {
+                            self.chess.apply_remote_ready(from_seat, &self.audio);
+                        }
+                    }
+                    NetEvent::BattleshipReady { from_seat, pair } => {
+                        if self.current_screen == Screen::Battleship && self.battleship.online_mode && pair == self.net.my_pair() {
+                            self.battleship.apply_remote_ready(from_seat, &self.audio);
                         }
                     }
                     NetEvent::WarStart { seed } => {
@@ -648,6 +682,9 @@ impl eframe::App for GameHubApp {
                         if self.current_screen == Screen::Battleship
                             && self.net.playing_pair("battleship") == Some(pair)
                         {
+                            if self.battleship.online_lobby {
+                                self.battleship.start_game();
+                            }
                             self.battleship.receive_enemy_fleet(ships, from_seat);
                         }
                     }
@@ -660,6 +697,9 @@ impl eframe::App for GameHubApp {
                         if self.current_screen == Screen::Battleship
                             && self.net.playing_pair("battleship") == Some(pair)
                         {
+                            if self.battleship.online_lobby {
+                                self.battleship.start_game();
+                            }
                             self.battleship
                                 .receive_enemy_shot(x, y, from_seat, &self.audio);
                         }
@@ -749,6 +789,21 @@ impl eframe::App for GameHubApp {
                 self.war.outgoing_ready = false;
                 self.net.send_event(&NetEvent::WarReady {
                     from_seat: self.net.my_pair_seat(),
+                    pair: self.net.my_pair(),
+                });
+            }
+            if self.chess.outgoing_ready {
+                self.chess.outgoing_ready = false;
+                self.net.send_event(&NetEvent::ChessReady {
+                    from_seat: self.net.my_pair_seat(),
+                    pair: self.net.my_pair(),
+                });
+            }
+            if self.battleship.outgoing_ready {
+                self.battleship.outgoing_ready = false;
+                self.net.send_event(&NetEvent::BattleshipReady {
+                    from_seat: self.net.my_pair_seat(),
+                    pair: self.net.my_pair(),
                 });
             }
             if let Some(seed) = self.war.outgoing_start_seed.take() {

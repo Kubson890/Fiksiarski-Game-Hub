@@ -4,12 +4,15 @@ use rand::Rng;
 use serde_json::{json, Value};
 use std::time::Instant;
 
-const FLEET_SIZES: [(usize, &str); 5] = [
+const FLEET_SIZES: [(usize, &str); 8] = [
     (5, "Lotniskowiec (5)"),
     (4, "Pancernik (4)"),
     (3, "Krążownik (3)"),
     (3, "Okręt podwodny (3)"),
+    (3, "Fregata (3)"),
     (2, "Niszczyciel (2)"),
+    (2, "Korweta (2)"),
+    (2, "Torpedowiec (2)"),
 ];
 
 #[derive(Clone, Copy)]
@@ -81,6 +84,12 @@ pub struct BattleshipGame {
     spectator_turn: usize,
     /// Czy obserwator dostał już pełny stan plansz.
     state_ready: bool,
+    /// Poczekalnia online — obaj gracze muszą potwierdzić gotowość przed rozmieszczeniem okrętów.
+    pub online_lobby: bool,
+    pub my_ready: bool,
+    pub opponent_ready: bool,
+    pub outgoing_ready: bool,
+    pub enemy_present: bool,
 }
 
 impl Default for BattleshipGame {
@@ -107,6 +116,11 @@ impl Default for BattleshipGame {
             spectators: 0,
             spectator_turn: 0,
             state_ready: true,
+            online_lobby: false,
+            my_ready: false,
+            opponent_ready: false,
+            outgoing_ready: false,
+            enemy_present: false,
         };
         g.new_game();
         g
@@ -142,6 +156,11 @@ impl BattleshipGame {
         self.online_mode = false;
         self.spectator = false;
         self.waiting = false;
+        self.online_lobby = false;
+        self.my_ready = false;
+        self.opponent_ready = false;
+        self.outgoing_ready = false;
+        self.enemy_present = false;
         self.state_ready = true;
     }
 
@@ -151,9 +170,59 @@ impl BattleshipGame {
         self.my_seat = player_idx.min(1);
         self.spectator = false;
         self.waiting = false;
+        self.online_lobby = true;
+        self.my_ready = false;
+        self.opponent_ready = false;
+        self.outgoing_ready = false;
+        self.enemy_present = false;
         self.my_turn_online = self.my_seat == 0;
         self.spectator_turn = 0;
         self.state_ready = true;
+        // Czekamy na gotowość w poczekalni
+    }
+
+    pub fn set_enemy_present(&mut self, present: bool) {
+        if self.enemy_present != present {
+            self.enemy_present = present;
+            if !present {
+                self.opponent_ready = false;
+                self.my_ready = false;
+            }
+        }
+    }
+
+    pub fn mark_ready(&mut self, audio: &SoundManager) {
+        if !self.online_mode || !self.online_lobby || self.my_ready {
+            return;
+        }
+        audio.play(Sfx::Click);
+        self.my_ready = true;
+        self.outgoing_ready = true;
+        if self.my_ready && self.opponent_ready {
+            self.start_game();
+        }
+    }
+
+    pub fn apply_remote_ready(&mut self, from_seat: usize, audio: &SoundManager) {
+        if !self.online_mode || !self.online_lobby {
+            return;
+        }
+        if from_seat == self.my_seat {
+            return; // ignoruj własne echo
+        }
+        if !self.opponent_ready {
+            audio.play(Sfx::Check);
+        }
+        self.opponent_ready = true;
+        if self.my_ready && self.opponent_ready {
+            self.start_game();
+        }
+    }
+
+    pub fn start_game(&mut self) {
+        self.online_lobby = false;
+        self.my_ready = false;
+        self.opponent_ready = false;
         self.new_game();
     }
 
@@ -521,26 +590,32 @@ impl BattleshipGame {
 
     fn generate_random_fleet() -> Vec<Ship> {
         let mut rng = rand::thread_rng();
-        let mut fleet = Vec::with_capacity(5);
-
-        for &(len, _) in &FLEET_SIZES {
-            loop {
-                let horizontal = rng.gen_bool(0.5);
-                let x = rng.gen_range(0..10);
-                let y = rng.gen_range(0..10);
-                let cand = Ship {
-                    x,
-                    y,
-                    len,
-                    horizontal,
-                };
-                if Self::can_place_ship(&fleet, cand) {
-                    fleet.push(cand);
-                    break;
+        'outer: loop {
+            let mut fleet = Vec::with_capacity(FLEET_SIZES.len());
+            for &(len, _) in &FLEET_SIZES {
+                let mut placed = false;
+                for _ in 0..1000 {
+                    let horizontal = rng.gen_bool(0.5);
+                    let x = rng.gen_range(0..10);
+                    let y = rng.gen_range(0..10);
+                    let cand = Ship {
+                        x,
+                        y,
+                        len,
+                        horizontal,
+                    };
+                    if Self::can_place_ship(&fleet, cand) {
+                        fleet.push(cand);
+                        placed = true;
+                        break;
+                    }
+                }
+                if !placed {
+                    continue 'outer;
                 }
             }
+            return fleet;
         }
-        fleet
     }
 
     fn has_ship_at(ships: &[Ship], x: usize, y: usize) -> bool {
@@ -693,7 +768,108 @@ impl BattleshipGame {
         }
     }
 
+    fn render_online_lobby(&mut self, ui: &mut egui::Ui, audio: &SoundManager) {
+        let full_rect = ui.available_rect_before_wrap();
+        ui.painter()
+            .rect_filled(full_rect, 12.0, egui::Color32::from_rgb(16, 26, 38));
+
+        let mut child_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(full_rect.shrink(18.0))
+                .layout(egui::Layout::top_down(egui::Align::Center)),
+        );
+        let ui = &mut child_ui;
+
+        ui.add_space(24.0);
+        ui.label(
+            egui::RichText::new("🚢 Statki — Stolik online")
+                .size(26.0)
+                .strong()
+                .color(egui::Color32::WHITE),
+        );
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Rozmieszczanie okrętów rozpocznie się, gdy obaj kapitanowie potwierdzą gotowość.")
+                .size(15.0)
+                .color(egui::Color32::from_rgb(175, 205, 230)),
+        );
+        ui.add_space(20.0);
+
+        let my_label = if self.my_ready {
+            "✅ Gotowy"
+        } else {
+            "⏳ Niegotowy"
+        };
+        let opp_label = if !self.enemy_present {
+            "❌ Brak przeciwnika"
+        } else if self.opponent_ready {
+            "✅ Gotowy"
+        } else {
+            "⏳ Niegotowy"
+        };
+
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(24, 38, 54))
+            .rounding(10.0)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.set_width((full_rect.width() - 100.0).clamp(200.0, 380.0));
+                ui.label(
+                    egui::RichText::new(format!("🧑 Ty (Flota #{}): {}", self.my_seat + 1, my_label))
+                        .size(17.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                );
+            });
+        ui.add_space(8.0);
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(24, 38, 54))
+            .rounding(10.0)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                ui.set_width((full_rect.width() - 100.0).clamp(200.0, 380.0));
+                ui.label(
+                    egui::RichText::new(format!("🌐 Przeciwnik: {}", opp_label))
+                        .size(17.0)
+                        .strong()
+                        .color(egui::Color32::WHITE),
+                );
+            });
+
+        ui.add_space(20.0);
+        if !self.enemy_present {
+            ui.label(
+                egui::RichText::new("⏳ Czekam na drugiego gracza ze stolika...")
+                    .size(16.0)
+                    .color(egui::Color32::GOLD),
+            );
+        } else if self.my_ready {
+            ui.label(
+                egui::RichText::new("⏳ Czekam na drugiego kapitana...")
+                    .size(16.0)
+                    .color(egui::Color32::GOLD),
+            );
+        } else {
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("✅ Jestem gotowy").size(19.0).strong(),
+                    )
+                    .min_size(egui::vec2(260.0, 48.0)),
+                )
+                .clicked()
+            {
+                self.mark_ready(audio);
+            }
+        }
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, audio: &SoundManager) {
+        if self.online_mode && self.online_lobby {
+            self.render_online_lobby(ui, audio);
+            return;
+        }
+
         if self.spectator {
             self.spectator_ui(ui);
             return;
@@ -858,7 +1034,7 @@ impl BattleshipGame {
         ui.painter().text(
             egui::pos2(left_board.center().x, left_board.top() - 14.0),
             egui::Align2::CENTER_CENTER,
-            format!("🛡 TWOJA FLOTA ({}/5)", p_alive),
+            format!("🛡 TWOJA FLOTA ({}/{})", p_alive, FLEET_SIZES.len()),
             egui::FontId::proportional(16.5),
             egui::Color32::WHITE,
         );
@@ -866,7 +1042,7 @@ impl BattleshipGame {
         ui.painter().text(
             egui::pos2(right_board.center().x, right_board.top() - 14.0),
             egui::Align2::CENTER_CENTER,
-            format!("📡 RADAR WROGA ({}/5)", b_alive),
+            format!("📡 RADAR WROGA ({}/{})", b_alive, FLEET_SIZES.len()),
             egui::FontId::proportional(16.5),
             egui::Color32::from_rgb(255, 195, 110),
         );
@@ -1140,14 +1316,14 @@ impl BattleshipGame {
         ui.painter().text(
             egui::pos2(left_board.center().x, left_board.top() - 14.0),
             egui::Align2::CENTER_CENTER,
-            format!("🟦 GRACZ 1 ({}/5)", p_alive),
+            format!("🟦 GRACZ 1 ({}/{})", p_alive, FLEET_SIZES.len()),
             egui::FontId::proportional(16.5),
             egui::Color32::WHITE,
         );
         ui.painter().text(
             egui::pos2(right_board.center().x, right_board.top() - 14.0),
             egui::Align2::CENTER_CENTER,
-            format!("🟥 GRACZ 2 ({}/5)", b_alive),
+            format!("🟥 GRACZ 2 ({}/{})", b_alive, FLEET_SIZES.len()),
             egui::FontId::proportional(16.5),
             egui::Color32::WHITE,
         );
