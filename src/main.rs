@@ -522,6 +522,27 @@ impl eframe::App for GameHubApp {
             ctx.set_style(style);
         }
 
+        // Logowanie i sprawdzanie aktualizacji działają w tle — UI nigdy nie
+        // czeka synchronicznie na serwer.
+        if let Some(ok) = self.net.poll_login() {
+            if ok {
+                if let Some(u) = &self.net.current_user {
+                    self.blackjack.set_chips(u.chips);
+                    self.last_synced_chips = u.chips;
+                }
+                // Jeśli gracz zdążył wybrać tryb offline, nie przerywamy mu gry.
+                if self.current_screen == Screen::Login {
+                    self.is_online_session = true;
+                    self.current_screen = Screen::RoomSelect;
+                }
+            }
+            ctx.request_repaint();
+        }
+        self.net.poll_updates();
+        if self.net.login_pending {
+            ctx.request_repaint_after(std::time::Duration::from_millis(120));
+        }
+
         if self.is_online_session && self.net.connected_room.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(30));
             let events = self.net.poll_events();
@@ -1291,15 +1312,7 @@ impl GameHubApp {
                                     .clicked()
                                 {
                                     self.audio.play(Sfx::Click);
-                                    if self.net.login_or_register(false) {
-                                        if let Some(u) = &self.net.current_user {
-                                            self.blackjack.set_chips(u.chips);
-                                            self.last_synced_chips = u.chips;
-                                        }
-                                        self.is_online_session = true;
-                                        self.net.fetch_rooms();
-                                        self.current_screen = Screen::RoomSelect;
-                                    }
+                                    self.net.start_login(false);
                                 }
 
                                 ui.add_space(12.0);
@@ -1401,15 +1414,7 @@ impl GameHubApp {
                                         .clicked()
                                     {
                                         self.audio.play(Sfx::Click);
-                                        if self.net.login_or_register(false) {
-                                            if let Some(u) = &self.net.current_user {
-                                                self.blackjack.set_chips(u.chips);
-                                                self.last_synced_chips = u.chips;
-                                            }
-                                            self.is_online_session = true;
-                                            self.net.fetch_rooms();
-                                            self.current_screen = Screen::RoomSelect;
-                                        }
+                                        self.net.start_login(false);
                                     }
 
                                     if ui
@@ -1422,15 +1427,7 @@ impl GameHubApp {
                                         .clicked()
                                     {
                                         self.audio.play(Sfx::Click);
-                                        if self.net.login_or_register(true) {
-                                            if let Some(u) = &self.net.current_user {
-                                                self.blackjack.set_chips(u.chips);
-                                                self.last_synced_chips = u.chips;
-                                            }
-                                            self.is_online_session = true;
-                                            self.net.fetch_rooms();
-                                            self.current_screen = Screen::RoomSelect;
-                                        }
+                                        self.net.start_login(true);
                                     }
                                 });
 
@@ -1452,6 +1449,17 @@ impl GameHubApp {
                                     self.net.check_for_updates();
                                     self.current_screen = Screen::Hub;
                                 }
+                            }
+
+                            if self.net.login_pending {
+                                ui.add_space(12.0);
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(
+                                        egui::RichText::new("Łączenie z serwerem…")
+                                            .color(egui::Color32::LIGHT_GRAY),
+                                    );
+                                });
                             }
                         });
                 });

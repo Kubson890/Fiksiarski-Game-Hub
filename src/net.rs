@@ -10,6 +10,20 @@ use sha2::{Sha256, Digest};
 
 pub const APP_VERSION: &str = "0.6.0";
 
+/// Twarde limity dla wywołań HTTP. Bez nich nieosiągalny serwer blokował
+/// wątek UI na czas retransmisji TCP (minuty), a system uznawał okno za
+/// zawieszone i je zabijał.
+const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+const HTTP_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+fn http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(HTTP_CONNECT_TIMEOUT)
+        .timeout_read(HTTP_IO_TIMEOUT)
+        .timeout_write(HTTP_IO_TIMEOUT)
+        .build()
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SavedCredentials {
     pub server_url: String,
@@ -230,6 +244,10 @@ pub struct NetClient {
     pub incoming_reset_pair: Option<usize>,
     ws_tx: Option<Sender<String>>,
     ws_rx: Option<Receiver<NetEvent>>,
+    login_rx: Option<Receiver<Result<UserProfile, String>>>,
+    update_rx: Option<Receiver<Option<Option<(String, Option<String>)>>>>,
+    /// Trwa logowanie w wątku tła — UI pozostaje responsywne.
+    pub login_pending: bool,
     /// Nicki innych graczy: slot → nick
     pub peer_nicks: std::collections::HashMap<usize, String>,
 }
@@ -273,6 +291,9 @@ impl Default for NetClient {
             incoming_reset_pair: None,
             ws_tx: None,
             ws_rx: None,
+            login_rx: None,
+            update_rx: None,
+            login_pending: false,
             peer_nicks: std::collections::HashMap::new(),
         };
         client.load_credentials();
@@ -339,26 +360,62 @@ impl NetClient {
         let platform = "linux";
 
         let url = format!("{}/api/version?platform={}", self.server_url.trim_end_matches('/'), platform);
-        if let Ok(resp) = ureq::get(&url).call() {
-            if let Ok(val) = resp.into_json::<serde_json::Value>() {
-                let srv_ver = val
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(APP_VERSION)
-                    .trim();
-                let has_bin = val
-                    .get("has_binary")
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(false);
-                let sha256 = val.get("sha256").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                if srv_ver != APP_VERSION && has_bin {
-                    self.available_update = Some(srv_ver.to_string());
-                    self.update_sha256 = if sha256.is_empty() { None } else { Some(sha256) };
-                } else {
-                    self.available_update = None;
-                    self.update_sha256 = None;
+        let (tx, rx) = mpsc::channel();
+        self.update_rx = Some(rx);
+        std::thread::spawn(move || {
+            let mut result: Option<Option<(String, Option<String>)>> = None;
+            if let Ok(resp) = http_agent().get(&url).call() {
+                if let Ok(val) = resp.into_json::<serde_json::Value>() {
+                    let srv_ver = val
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(APP_VERSION)
+                        .trim()
+                        .to_string();
+                    let has_bin = val
+                        .get("has_binary")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
+                    let sha256 = val
+                        .get("sha256")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    result = Some(if srv_ver != APP_VERSION && has_bin {
+                        Some((srv_ver, if sha256.is_empty() { None } else { Some(sha256) }))
+                    } else {
+                        None
+                    });
                 }
             }
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Odpytuje wątek sprawdzania aktualizacji.
+    pub fn poll_updates(&mut self) {
+        let result = {
+            let Some(rx) = self.update_rx.as_ref() else {
+                return;
+            };
+            match rx.try_recv() {
+                Ok(result) => result,
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => None,
+            }
+        };
+        self.update_rx = None;
+        match result {
+            Some(Some((ver, sha))) => {
+                self.available_update = Some(ver);
+                self.update_sha256 = sha;
+            }
+            Some(None) => {
+                self.available_update = None;
+                self.update_sha256 = None;
+            }
+            // Brak odpowiedzi serwera — zostawiamy poprzedni stan.
+            None => {}
         }
     }
 
@@ -373,7 +430,7 @@ impl NetClient {
             self.server_url.trim_end_matches('/'),
             platform
         );
-        let Ok(resp) = ureq::get(&url).call() else {
+        let Ok(resp) = http_agent().get(&url).call() else {
             self.update_status = "❌ Błąd pobierania aktualizacji z serwera!".to_string();
             return;
         };
@@ -466,13 +523,52 @@ impl NetClient {
 
     pub fn fetch_rooms(&mut self) {
         let url = format!("{}/api/rooms", self.server_url.trim_end_matches('/'));
-        if let Ok(resp) = ureq::get(&url).call() {
+        if let Ok(resp) = http_agent().get(&url).call() {
             if let Ok(list) = resp.into_json::<Vec<RoomStatus>>() {
                 if !list.is_empty() {
                     self.available_rooms = list;
                 }
             }
         }
+    }
+
+    /// Łączy WebSocket z limitem czasu. Dla `ws://` tworzymy gniazdo przez
+    /// `TcpStream::connect_timeout`, żeby nieosiągalny serwer nie zawieszał UI.
+    fn connect_ws(
+        url: &str,
+    ) -> Result<
+        (
+            tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>,
+            tungstenite::handshake::client::Response,
+        ),
+        String,
+    > {
+        if !url.starts_with("ws://") {
+            return connect(url).map_err(|e| e.to_string());
+        }
+
+        use std::net::ToSocketAddrs;
+
+        let rest = url.trim_start_matches("ws://");
+        let host_port = rest.split('/').next().unwrap_or(rest);
+        let addr = host_port
+            .to_socket_addrs()
+            .map_err(|e| e.to_string())?
+            .next()
+            .ok_or_else(|| "nie można rozwiązać adresu serwera".to_string())?;
+
+        let stream = std::net::TcpStream::connect_timeout(&addr, HTTP_CONNECT_TIMEOUT)
+            .map_err(|e| e.to_string())?;
+        let _ = stream.set_read_timeout(Some(HTTP_IO_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(HTTP_IO_TIMEOUT));
+
+        tungstenite::client::client(url, tungstenite::stream::MaybeTlsStream::Plain(stream))
+            .map_err(|e| match e {
+                tungstenite::handshake::HandshakeError::Failure(err) => err.to_string(),
+                tungstenite::handshake::HandshakeError::Interrupted(_) => {
+                    "przerwano uzgadnianie połączenia".to_string()
+                }
+            })
     }
 
     pub fn connect_to_room(&mut self, room_id: &str) -> bool {
@@ -489,8 +585,11 @@ impl NetClient {
             .replace("https://", "wss://");
         let url = format!("{}/ws/{}", ws_base, room);
 
-        let Ok((mut socket, _)) = connect(&url) else {
-            self.auth_error = format!("Nie udało się połączyć z pokojem {}!", room);
+        let Ok((mut socket, _)) = Self::connect_ws(&url) else {
+            self.auth_error = format!(
+                "Nie udało się połączyć z pokojem {}! Sprawdź adres serwera.",
+                room
+            );
             return false;
         };
 
@@ -736,17 +835,111 @@ impl NetClient {
         events
     }
 
-    pub fn login_or_register(&mut self, is_register: bool) -> bool {
-        if !is_register && !self.auth_token.is_empty() {
-            if self.try_token_login() {
-                return true;
+    /// Uruchamia logowanie w wątku tła, dzięki czemu UI nie zamarza,
+    /// nawet gdy serwer jest nieosiągalny.
+    pub fn start_login(&mut self, is_register: bool) {
+        if self.login_pending {
+            return;
+        }
+        if !is_register && self.auth_token.is_empty() && self.password_input.is_empty() {
+            self.auth_error = "Wpisz hasło, aby się zalogować.".to_string();
+            self.show_account_form = true;
+            return;
+        }
+
+        self.auth_error.clear();
+        self.login_pending = true;
+        let (tx, rx) = mpsc::channel();
+        self.login_rx = Some(rx);
+
+        let server_url = self.server_url.clone();
+        let username = self.username_input.clone();
+        let password = self.password_input.clone();
+        let token = self.auth_token.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Self::login_request(
+                &server_url,
+                &username,
+                &password,
+                &token,
+                is_register,
+            ));
+        });
+    }
+
+    /// Odpytuje wątek logowania. Zwraca `Some(true)` po udanym logowaniu.
+    pub fn poll_login(&mut self) -> Option<bool> {
+        if !self.login_pending {
+            return None;
+        }
+        let outcome = {
+            let rx = self.login_rx.as_ref()?;
+            match rx.try_recv() {
+                Ok(res) => res,
+                Err(TryRecvError::Empty) => return None,
+                Err(TryRecvError::Disconnected) => {
+                    Err("Brak odpowiedzi serwera logowania.".to_string())
+                }
+            }
+        };
+
+        self.login_pending = false;
+        self.login_rx = None;
+
+        match outcome {
+            Ok(profile) => {
+                self.auth_token = profile.token.clone();
+                self.current_user = Some(profile);
+                self.auth_error.clear();
+                self.password_input.clear();
+                self.save_credentials();
+                self.fetch_leaderboard();
+                self.fetch_rooms();
+                self.check_for_updates();
+                Some(true)
+            }
+            Err(msg) => {
+                self.auth_error = msg;
+                Some(false)
+            }
+        }
+    }
+
+    fn login_request(
+        server_url: &str,
+        username: &str,
+        password: &str,
+        token: &str,
+        is_register: bool,
+    ) -> Result<UserProfile, String> {
+        let base = server_url.trim_end_matches('/');
+        let agent = http_agent();
+
+        if !is_register && !token.is_empty() {
+            let url = format!("{}/api/token_login", base);
+            let payload = serde_json::json!({
+                "username": username,
+                "token": token,
+            });
+            match agent.post(&url).send_json(payload) {
+                Ok(resp) => {
+                    if let Ok(profile) = resp.into_json::<UserProfile>() {
+                        return Ok(profile);
+                    }
+                }
+                // Token odrzucony przez serwer (np. wygasł) — próbujemy hasła.
+                Err(ureq::Error::Status(_, _)) => {}
+                Err(_) => {
+                    return Err(
+                        "Brak połączenia z serwerem! Upewnij się, że działa server.py."
+                            .to_string(),
+                    )
+                }
             }
         }
 
-        if self.password_input.is_empty() {
-            self.auth_error = "Wpisz hasło, aby się zalogować.".to_string();
-            self.show_account_form = true;
-            return false;
+        if password.is_empty() {
+            return Err("Wpisz hasło, aby się zalogować.".to_string());
         }
 
         let endpoint = if is_register {
@@ -754,69 +947,27 @@ impl NetClient {
         } else {
             "/api/login"
         };
-        let url = format!("{}{}", self.server_url.trim_end_matches('/'), endpoint);
-
+        let url = format!("{}{}", base, endpoint);
         let payload = serde_json::json!({
-            "username": self.username_input,
-            "password": self.password_input,
+            "username": username,
+            "password": password,
         });
 
-        match ureq::post(&url).send_json(payload) {
-            Ok(resp) => {
-                if let Ok(profile) = resp.into_json::<UserProfile>() {
-                    self.auth_token = profile.token.clone();
-                    self.current_user = Some(profile);
-                    self.auth_error.clear();
-                    self.password_input.clear();
-                    self.save_credentials();
-                    self.fetch_leaderboard();
-                    self.fetch_rooms();
-                    self.check_for_updates();
-                    return true;
-                }
-                self.auth_error = "Błąd parsowania odpowiedzi serwera.".to_string();
-                false
-            }
+        match agent.post(&url).send_json(payload) {
+            Ok(resp) => resp
+                .into_json::<UserProfile>()
+                .map_err(|_| "Błąd parsowania odpowiedzi serwera.".to_string()),
             Err(ureq::Error::Status(_code, resp)) => {
                 if let Ok(val) = resp.into_json::<serde_json::Value>() {
                     if let Some(detail) = val.get("detail").and_then(|d| d.as_str()) {
-                        self.auth_error = detail.to_string();
-                        return false;
+                        return Err(detail.to_string());
                     }
                 }
-                self.auth_error = "Błąd autoryzacji.".to_string();
-                false
+                Err("Błąd autoryzacji.".to_string())
             }
-            Err(_) => {
-                self.auth_error =
-                    "Brak połączenia z serwerem! Upewnij się, że działa server.py.".to_string();
-                false
-            }
-        }
-    }
-
-    fn try_token_login(&mut self) -> bool {
-        let url = format!("{}/api/token_login", self.server_url.trim_end_matches('/'));
-        let payload = serde_json::json!({
-            "username": self.username_input,
-            "token": self.auth_token,
-        });
-
-        match ureq::post(&url).send_json(payload) {
-            Ok(resp) => {
-                if let Ok(profile) = resp.into_json::<UserProfile>() {
-                    self.auth_token = profile.token.clone();
-                    self.current_user = Some(profile);
-                    self.auth_error.clear();
-                    self.save_credentials();
-                    self.fetch_leaderboard();
-                    self.fetch_rooms();
-                    self.check_for_updates();
-                    return true;
-                }
-                false
-            }
-            Err(_) => false,
+            Err(_) => Err(
+                "Brak połączenia z serwerem! Upewnij się, że działa server.py.".to_string(),
+            ),
         }
     }
 
@@ -832,7 +983,7 @@ impl NetClient {
             "chips": new_chips,
         });
 
-        if let Ok(resp) = ureq::post(&url).send_json(payload) {
+        if let Ok(resp) = http_agent().post(&url).send_json(payload) {
             if let Ok(updated) = resp.into_json::<UserProfile>() {
                 self.current_user = Some(updated);
             }
@@ -841,7 +992,7 @@ impl NetClient {
 
     pub fn fetch_leaderboard(&mut self) {
         let url = format!("{}/api/leaderboard", self.server_url.trim_end_matches('/'));
-        if let Ok(resp) = ureq::get(&url).call() {
+        if let Ok(resp) = http_agent().get(&url).call() {
             if let Ok(rows) = resp.into_json::<Vec<LeaderboardRow>>() {
                 self.leaderboard = rows;
             }
