@@ -92,14 +92,6 @@ impl CategoriesGame {
         self.update_lobby_status();
     }
 
-    pub fn update_roster(&mut self, my_idx: usize, players_count: usize) {
-        self.my_player_idx = my_idx.min(3);
-        self.active_players = players_count.clamp(1, 4);
-        if self.phase == CatPhase::Lobby {
-            self.update_lobby_status();
-        }
-    }
-
     fn update_lobby_status(&mut self) {
         if self.active_players < 2 {
             self.status_text =

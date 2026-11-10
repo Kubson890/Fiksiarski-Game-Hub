@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use tungstenite::{connect, Message};
 use sha2::{Sha256, Digest};
 
-pub const APP_VERSION: &str = "0.2.0";
+pub const APP_VERSION: &str = "0.6.0";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SavedCredentials {
@@ -138,6 +138,32 @@ pub enum NetEvent {
         from_room_seat: usize,
     },
     WarStep,
+    /// Host pokoju rozpoczyna grę w Chińczyka dla aktualnie obecnych graczy.
+    LudoStart,
+    /// Gracz potwierdza gotowość do gry w Wojnę.
+    WarReady {
+        #[serde(default)]
+        from_seat: usize,
+    },
+    /// Host stołu wysyła ziarno, z którego obaj gracze tasują talię.
+    WarStart {
+        seed: u64,
+    },
+    /// Informacja, że gracz wyszedł z konkretnej gry.
+    PeerLeftGame {
+        slot: usize,
+        #[serde(default)]
+        nick: String,
+        #[serde(default)]
+        game: String,
+    },
+    /// Gra została zamknięta (brak graczy / stół opuszczony) – klienci resetują stan.
+    GameClosed {
+        #[serde(default)]
+        game: String,
+        #[serde(default)]
+        pair: usize,
+    },
     BattleshipFleet {
         ships: Vec<(usize, usize, usize, bool)>,
         #[serde(default)]
@@ -544,10 +570,6 @@ impl NetClient {
         self.peer_nicks.clear();
     }
 
-    pub fn is_spectator(&self, max_players: usize) -> bool {
-        self.connected_room.is_some() && self.my_player_idx >= max_players
-    }
-
     pub fn my_pair(&self) -> usize {
         self.my_slot / 2
     }
@@ -563,6 +585,26 @@ impl NetClient {
     pub fn slot_focus(&self, slot: usize) -> Option<&str> {
         let idx = self.room_order.iter().position(|s| *s == slot)?;
         self.room_focus.get(idx).map(String::as_str)
+    }
+
+    /// Wszystkie sloty (w kolejności pokoju), które aktualnie mają otwartą daną grę.
+    pub fn game_focused_slots(&self, game: &str) -> Vec<usize> {
+        self.room_order
+            .iter()
+            .copied()
+            .filter(|slot| self.slot_focus(*slot) == Some(game))
+            .collect()
+    }
+
+    /// Miejsce w grze pokojowej (0..n-1) liczone tylko spośród faktycznie obecnych graczy.
+    pub fn room_game_seat(&self, game: &str) -> Option<usize> {
+        self.game_focused_slots(game)
+            .iter()
+            .position(|slot| *slot == self.my_slot)
+    }
+
+    pub fn room_game_players(&self, game: &str) -> usize {
+        self.game_focused_slots(game).len()
     }
 
     pub fn pair_active(&self, pair: usize, game: &str) -> bool {

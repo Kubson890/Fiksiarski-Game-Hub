@@ -14,6 +14,7 @@ mod war;
 use audio::{Sfx, SoundManager};
 use eframe::egui;
 use net::{NetClient, NetEvent};
+use std::time::Instant;
 
 fn setup_custom_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
@@ -86,9 +87,13 @@ struct GameHubApp {
     net: NetClient,
     last_synced_chips: i32,
     last_room_order: Vec<usize>,
+    last_room_focus: Vec<String>,
+    last_room_game_slots: [Vec<usize>; 3],
     last_sent_focus: Option<String>,
     last_my_pair_game: Option<String>,
     last_watched_pair: Option<(String, usize)>,
+    last_war_active: bool,
+    peer_left_notice: Option<(String, Instant)>,
     blackjack: blackjack::BlackjackGame,
     solitaire: solitaire::SolitaireGame,
     chess: chess::ChessGame,
@@ -100,13 +105,14 @@ struct GameHubApp {
 }
 
 fn is_two_player_screen(screen: Screen) -> bool {
-    matches!(screen, Screen::Chess | Screen::Battleship)
+    matches!(screen, Screen::Chess | Screen::Battleship | Screen::War)
 }
 
 fn screen_game_key(screen: Screen) -> Option<&'static str> {
     match screen {
         Screen::Chess => Some("chess"),
         Screen::Battleship => Some("battleship"),
+        Screen::War => Some("war"),
         Screen::Ludo => Some("ludo"),
         Screen::Uno => Some("uno"),
         Screen::Categories => Some("categories"),
@@ -114,9 +120,14 @@ fn screen_game_key(screen: Screen) -> Option<&'static str> {
     }
 }
 
+const ROOM_GAMES: [&str; 3] = ["ludo", "uno", "categories"];
+
+fn is_room_game(game: &str) -> bool {
+    ROOM_GAMES.contains(&game)
+}
+
 impl GameHubApp {
     fn reset_online_game(&mut self, game: &str) {
-        let count = self.net.room_players_count.max(1);
         match game {
             "chess" => {
                 self.chess.setup_online(self.net.my_pair_seat());
@@ -130,38 +141,83 @@ impl GameHubApp {
                     self.last_my_pair_game = Some("battleship".to_string());
                 }
             }
-            "ludo" => self.ludo.setup_online(self.net.my_player_idx, count),
-            "uno" => self.uno.setup_online(self.net.my_player_idx, count),
-            "categories" => self.categories.setup_online(self.net.my_player_idx, count),
+            "war" => {
+                self.war.setup_online(self.net.my_pair_seat());
+                let present = self.net.my_pair_active("war");
+                self.war.set_enemy_present(present);
+                self.last_war_active = present;
+                if self.current_game_key() == "war" {
+                    self.last_my_pair_game = Some("war".to_string());
+                }
+            }
+            "ludo" | "uno" | "categories" => self.reset_room_game(game),
             _ => {}
+        }
+    }
+
+    /// Reset gry pokojowej do poczekalni na podstawie aktualnie obecnych graczy.
+    fn reset_room_game(&mut self, game: &str) {
+        let slots = self.net.game_focused_slots(game);
+        let my_seat = slots
+            .iter()
+            .position(|slot| *slot == self.net.my_slot)
+            .unwrap_or(0);
+        let count = slots.len();
+        if let Some(idx) = ROOM_GAMES.iter().position(|g| *g == game) {
+            self.last_room_game_slots[idx] = slots;
+        }
+        match game {
+            "ludo" => self.ludo.setup_online(my_seat, count),
+            "uno" => self.uno.setup_online(my_seat, count),
+            "categories" => self.categories.setup_online(my_seat, count),
+            _ => {}
+        }
+    }
+
+    /// Dopasowuje gry pokojowe do faktycznie otwartych ekranów graczy.
+    /// Każda zmiana składu (wejście/wyjście gracza) resetuje grę do poczekalni,
+    /// więc nigdy nie gramy z "duchem" drugiego gracza.
+    fn sync_room_games(&mut self) {
+        if !self.is_online_session || self.net.connected_room.is_none() {
+            return;
+        }
+        for (idx, game) in ROOM_GAMES.iter().enumerate() {
+            let slots = self.net.game_focused_slots(game);
+            if slots == self.last_room_game_slots[idx] {
+                continue;
+            }
+            self.last_room_game_slots[idx] = slots.clone();
+            let my_seat = slots
+                .iter()
+                .position(|slot| *slot == self.net.my_slot)
+                .unwrap_or(0);
+            let count = slots.len();
+            match *game {
+                "ludo" => self.ludo.setup_online(my_seat, count),
+                "uno" => self.uno.setup_online(my_seat, count),
+                "categories" => self.categories.setup_online(my_seat, count),
+                _ => {}
+            }
         }
     }
 
     fn handle_room_state_change(&mut self) {
         let new_order = self.net.room_order.clone();
-        if new_order == self.last_room_order {
+        let new_focus = self.net.room_focus.clone();
+        if new_order == self.last_room_order && new_focus == self.last_room_focus {
             return;
         }
 
         let old_order = std::mem::take(&mut self.last_room_order);
+        std::mem::take(&mut self.last_room_focus);
         let partner_slot = self.net.my_pair() * 2 + (1 - self.net.my_pair_seat());
         let old_partner = old_order.contains(&partner_slot);
         let new_partner = new_order.contains(&partner_slot);
-        let pair_roster_changed = old_partner != new_partner;
 
-        if pair_roster_changed {
+        if old_partner != new_partner {
             self.last_my_pair_game = None;
             self.last_watched_pair = None;
-            if self.net.my_pair() == 0 {
-                self.war.new_game();
-            }
-        }
-
-        if old_order != new_order {
-            let count = self.net.room_players_count.max(1);
-            self.ludo.setup_online(self.net.my_player_idx, count);
-            self.uno.setup_online(self.net.my_player_idx, count);
-            self.categories.update_roster(self.net.my_player_idx, count);
+            self.last_war_active = false;
         }
 
         if new_order.len() > old_order.len() {
@@ -171,6 +227,8 @@ impl GameHubApp {
         }
 
         self.last_room_order = new_order;
+        self.last_room_focus = new_focus;
+        self.sync_room_games();
     }
 
     fn sync_game_modes(&mut self) {
@@ -180,16 +238,22 @@ impl GameHubApp {
         let screen_game = match self.current_screen {
             Screen::Chess => Some("chess"),
             Screen::Battleship => Some("battleship"),
+            Screen::War => Some("war"),
             _ => None,
         };
 
         if let Some(prev) = self.last_my_pair_game.clone() {
             if screen_game != Some(prev.as_str()) {
                 self.last_my_pair_game = None;
+                self.last_watched_pair = None;
                 let seat = self.net.my_pair_seat();
                 match prev.as_str() {
                     "chess" => self.chess.setup_online(seat),
                     "battleship" => self.battleship.setup_online(seat),
+                    "war" => {
+                        self.war.reset_online_waiting();
+                        self.last_war_active = false;
+                    }
                     _ => {}
                 }
             }
@@ -197,10 +261,28 @@ impl GameHubApp {
 
         let Some(game) = screen_game else {
             self.last_watched_pair = None;
+            self.sync_room_games();
             return;
         };
         let seat = self.net.my_pair_seat();
         let count = self.net.spectator_count_for_game(game);
+
+        if game == "war" {
+            let active = self.net.pair_active(self.net.my_pair(), "war");
+            if !self.war.online_mode || (active && !self.last_war_active) {
+                // Pierwsze wejście lub przeciwnik (ponownie) usiadł do stołu.
+                self.war.setup_online(seat);
+            }
+            // Gdy przeciwnik wychodzi, zostawiamy stół w obecnym stanie, żeby
+            // gracz widział komunikat "wyszedł". Reset nastąpi po GameClosed.
+            self.last_war_active = active;
+            self.war.online_mode = true;
+            self.war.set_enemy_present(active);
+            self.last_my_pair_game = Some("war".to_string());
+            self.last_watched_pair = None;
+            self.sync_room_games();
+            return;
+        }
 
         if self.net.my_pair_active(game) {
             if self.last_my_pair_game.as_deref() != Some(game) {
@@ -251,11 +333,8 @@ impl GameHubApp {
             }
         } else {
             if self.last_my_pair_game.as_deref() == Some(game) {
-                match game {
-                    "chess" => self.chess.setup_online(seat),
-                    "battleship" => self.battleship.setup_online(seat),
-                    _ => {}
-                }
+                // Nie resetujemy planszy od razu – gracz ma zobaczyć komunikat,
+                // że przeciwnik wyszedł. Reset przyjdzie z serwera (GameClosed).
                 self.last_my_pair_game = None;
             }
             match game {
@@ -271,24 +350,25 @@ impl GameHubApp {
             }
             self.last_watched_pair = None;
         }
+        self.sync_room_games();
     }
 
     fn handle_state_request(&mut self, game: &str, pair: usize) {
-        if game == "chess" || game == "battleship" {
+        if game == "chess" || game == "battleship" || game == "war" {
             if self.net.my_pair() != pair || !self.net.my_pair_active(game) {
                 return;
             }
         }
         if let Some(state) = self.game_state_json(game) {
-            let is_room_game = matches!(game, "ludo" | "uno" | "categories");
+            let room_game = is_room_game(game);
             self.net.send_event(&NetEvent::GameState {
                 game: game.to_string(),
-                from_seat: if is_room_game {
-                    self.net.my_player_idx
+                from_seat: if room_game {
+                    self.net.room_game_seat(game).unwrap_or(0)
                 } else {
                     self.net.my_pair_seat()
                 },
-                pair: if is_room_game { 2 } else { pair },
+                pair: if room_game { 2 } else { pair },
                 state,
             });
         }
@@ -341,11 +421,9 @@ impl GameHubApp {
         self.current_screen = screen;
         if self.is_online_session && self.net.connected_room.is_some() {
             if let Some(game) = screen_game_key(screen) {
-                if matches!(game, "ludo" | "uno" | "categories") && self.net.my_player_idx != 0 {
-                    self.net.send_event(&NetEvent::StateRequest {
-                        game: game.to_string(),
-                        pair: 2,
-                    });
+                if is_room_game(game) {
+                    // Od razu pokaż poczekalnię, zamiast na moment gry z botami.
+                    self.reset_room_game(game);
                 }
             }
         }
@@ -356,10 +434,18 @@ impl GameHubApp {
         self.chess.spectator = false;
         self.chess.waiting = false;
         self.ludo.online_mode = false;
+        self.ludo.online_lobby = false;
         self.uno.online_mode = false;
+        self.uno.online_lobby = false;
+        self.war.online_mode = false;
+        self.war.online_lobby = false;
+        self.war.new_game();
         self.battleship.leave_online();
         self.last_my_pair_game = None;
         self.last_watched_pair = None;
+        self.last_war_active = false;
+        self.last_room_game_slots = Default::default();
+        self.peer_left_notice = None;
     }
 
     fn spectator_count_for_screen(&self, screen: Screen) -> usize {
@@ -387,10 +473,10 @@ impl GameHubApp {
             return false;
         }
         let game = self.current_game_key();
-        if game == "chess" || game == "battleship" {
+        if game == "chess" || game == "battleship" || game == "war" {
             self.net.my_pair_active(game) && !self.net.is_spectator_for_game(game)
         } else {
-            matches!(game, "ludo" | "uno" | "categories") && self.net.room_players_count >= 2
+            is_room_game(game) && self.net.room_game_players(game) >= 2
         }
     }
 
@@ -401,12 +487,15 @@ impl GameHubApp {
         let Some(pair) = self.net.incoming_reset_pair else {
             return false;
         };
-        if game == "chess" || game == "battleship" {
+        if game == "chess" || game == "battleship" || game == "war" {
             return pair == self.net.my_pair()
                 && self.net.my_pair_active(game)
                 && self.net.incoming_reset_from != Some(self.net.my_pair_seat());
         }
-        !self.net.is_spectator(4)
+        if is_room_game(game) {
+            return self.net.room_game_seat(game).is_some();
+        }
+        false
     }
 }
 
@@ -417,6 +506,7 @@ fn game_label(key: &str) -> &'static str {
         "ludo" => "Chińczyk",
         "uno" => "UNO",
         "categories" => "Państwa-Miasta",
+        "war" => "Wojna",
         _ => "grę",
     }
 }
@@ -467,24 +557,40 @@ impl eframe::App for GameHubApp {
                         }
                     }
                     NetEvent::LudoRoll { face } => {
-                        self.ludo.apply_remote_roll(face, &self.audio);
+                        if self.current_screen == Screen::Ludo && self.ludo.online_mode {
+                            self.ludo.apply_remote_roll(face, &self.audio);
+                        }
                     }
                     NetEvent::LudoMove { pawn_idx } => {
-                        self.ludo.apply_remote_pawn_move(pawn_idx, &self.audio);
+                        if self.current_screen == Screen::Ludo && self.ludo.online_mode {
+                            self.ludo.apply_remote_pawn_move(pawn_idx, &self.audio);
+                        }
+                    }
+                    NetEvent::LudoStart => {
+                        if self.ludo.online_mode {
+                            self.audio.play(Sfx::Click);
+                            self.ludo.apply_remote_start();
+                        }
                     }
                     NetEvent::UnoStart { seed } => {
-                        self.audio.play(Sfx::CardSlide);
-                        self.uno.init_from_seed(seed);
+                        if self.current_screen == Screen::Uno && self.uno.online_mode {
+                            self.audio.play(Sfx::CardSlide);
+                            self.uno.apply_remote_start(seed);
+                        }
                     }
                     NetEvent::UnoPlay {
                         card_idx,
                         chosen_color,
                     } => {
-                        self.uno
-                            .apply_remote_play(card_idx, chosen_color, &self.audio);
+                        if self.current_screen == Screen::Uno && self.uno.online_mode {
+                            self.uno
+                                .apply_remote_play(card_idx, chosen_color, &self.audio);
+                        }
                     }
                     NetEvent::UnoDraw => {
-                        self.uno.apply_remote_draw(&self.audio);
+                        if self.current_screen == Screen::Uno && self.uno.online_mode {
+                            self.uno.apply_remote_draw(&self.audio);
+                        }
                     }
                     NetEvent::CategoriesStart { letter, round } => {
                         self.categories.apply_start_round(letter, round, &self.audio);
@@ -507,10 +613,42 @@ impl eframe::App for GameHubApp {
                         self.categories
                             .apply_remote_vote(from_room_seat, votes, &self.audio);
                     }
-                    NetEvent::WarStep => {
-                        if self.current_screen == Screen::War {
-                            self.war.play_step(&self.audio);
+                    NetEvent::WarReady { from_seat } => {
+                        if self.current_screen == Screen::War && self.war.online_mode {
+                            self.war.apply_remote_ready(from_seat, &self.audio);
                         }
+                    }
+                    NetEvent::WarStart { seed } => {
+                        if self.current_screen == Screen::War && self.war.online_mode {
+                            self.audio.play(Sfx::CardSlide);
+                            self.war.apply_remote_start(seed);
+                        }
+                    }
+                    NetEvent::WarStep => {
+                        if self.current_screen == Screen::War && self.war.online_mode {
+                            self.war.apply_remote_step(&self.audio);
+                        }
+                    }
+                    NetEvent::PeerLeftGame { slot, nick, game } => {
+                        let who = if nick.trim().is_empty() {
+                            format!("Gracz #{}", slot + 1)
+                        } else {
+                            nick
+                        };
+                        let msg = format!("🚪 {} wyszedł z gry: {}", who, game_label(&game));
+                        self.peer_left_notice = Some((msg, Instant::now()));
+                        self.audio.play(Sfx::Click);
+                    }
+                    NetEvent::GameClosed { game, pair } => {
+                        self.net.reset_requested_by_me = false;
+                        self.net.incoming_reset_from = None;
+                        self.net.incoming_reset_game = None;
+                        self.net.incoming_reset_pair = None;
+                        if pair == self.net.my_pair() || pair == 2 {
+                            self.reset_online_game(&game);
+                        }
+                        let msg = format!("🔄 Gra {} została zresetowana.", game_label(&game));
+                        self.peer_left_notice = Some((msg, Instant::now()));
                     }
                     NetEvent::BattleshipFleet {
                         ships,
@@ -570,6 +708,10 @@ impl eframe::App for GameHubApp {
             if let Some(pawn_idx) = self.ludo.outgoing_pawn.take() {
                 self.net.send_event(&NetEvent::LudoMove { pawn_idx });
             }
+            if self.ludo.outgoing_start {
+                self.ludo.outgoing_start = false;
+                self.net.send_event(&NetEvent::LudoStart);
+            }
             if let Some(seed) = self.uno.outgoing_start_seed.take() {
                 self.net.send_event(&NetEvent::UnoStart { seed });
             }
@@ -590,33 +732,42 @@ impl eframe::App for GameHubApp {
             if self.categories.outgoing_stop {
                 self.categories.outgoing_stop = false;
                 self.net.send_event(&NetEvent::CategoriesStop {
-                    from_room_seat: self.net.my_player_idx,
+                    from_room_seat: self.categories.my_player_idx,
                 });
             }
             if let Some(answers) = self.categories.outgoing_submit.take() {
                 self.net.send_event(&NetEvent::CategoriesSubmit {
                     answers,
-                    from_room_seat: self.net.my_player_idx,
+                    from_room_seat: self.categories.my_player_idx,
                 });
             }
             if let Some(votes) = self.categories.outgoing_vote.take() {
                 self.net.send_event(&NetEvent::CategoriesVote {
                     votes,
-                    from_room_seat: self.net.my_player_idx,
+                    from_room_seat: self.categories.my_player_idx,
                 });
             }
             if self.categories.force_broadcast_state {
                 self.categories.force_broadcast_state = false;
                 self.net.send_event(&NetEvent::GameState {
-                    game: "ludo".to_string(),
-                    from_seat: self.net.my_player_idx,
+                    game: "categories".to_string(),
+                    from_seat: self.categories.my_player_idx,
                     pair: 2,
                     state: self.categories.state_json(),
                 });
             }
+            if self.war.outgoing_ready {
+                self.war.outgoing_ready = false;
+                self.net.send_event(&NetEvent::WarReady {
+                    from_seat: self.net.my_pair_seat(),
+                });
+            }
+            if let Some(seed) = self.war.outgoing_start_seed.take() {
+                self.net.send_event(&NetEvent::WarStart { seed });
+            }
             if self.war.outgoing_step {
                 self.war.outgoing_step = false;
-                if self.net.my_pair() == 0 {
+                if self.war.online_mode && self.net.my_pair() == 0 {
                     self.net.send_event(&NetEvent::WarStep);
                 }
             }
@@ -793,6 +944,20 @@ impl eframe::App for GameHubApp {
                                 }),
                         );
 
+                        if let Some((notice, at)) = self.peer_left_notice.clone() {
+                            if at.elapsed().as_secs_f32() < 8.0 {
+                                ui.separator();
+                                ui.label(
+                                    egui::RichText::new(notice)
+                                        .size(fs_info)
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(255, 190, 90)),
+                                );
+                            } else {
+                                self.peer_left_notice = None;
+                            }
+                        }
+
                         if let Some(requester) = self.net.incoming_reset_from {
                             ui.separator();
                             let can_vote = self.can_vote_on_pending_reset();
@@ -892,12 +1057,11 @@ impl eframe::App for GameHubApp {
                                 self.audio.play(Sfx::Click);
                                 self.net.reset_requested_by_me = true;
                                 let g_key = self.current_game_key().to_string();
-                                let pair_id =
-                                    if matches!(g_key.as_str(), "ludo" | "uno" | "categories") {
-                                        2
-                                    } else {
-                                        self.net.my_pair()
-                                    };
+                                let pair_id = if is_room_game(&g_key) {
+                                    2
+                                } else {
+                                    self.net.my_pair()
+                                };
                                 self.net.send_event(&NetEvent::ResetRequest {
                                     from_player: self.net.my_pair_seat(),
                                     game: g_key,

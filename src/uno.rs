@@ -145,6 +145,7 @@ pub struct UnoGame {
     status_text: String,
     pub newly_won: bool,
     pub online_mode: bool,
+    pub online_lobby: bool,
     pub my_player_idx: usize,
     pub outgoing_start_seed: Option<u64>,
     pub outgoing_play: Option<(usize, u8)>,
@@ -172,6 +173,7 @@ impl Default for UnoGame {
             status_text: String::new(),
             newly_won: false,
             online_mode: false,
+            online_lobby: false,
             my_player_idx: 0,
             outgoing_start_seed: None,
             outgoing_play: None,
@@ -296,10 +298,13 @@ impl UnoGame {
         );
     }
 
+    /// Ustawia grę online na podstawie faktycznie obecnych graczy.
+    /// Karty nie są rozdawane, dopóki host nie rozpocznie rozdania.
     pub fn setup_online(&mut self, my_idx: usize, players_count: usize) {
         self.online_mode = true;
+        self.online_lobby = true;
         self.my_player_idx = my_idx.min(3);
-        let active_humans = players_count.clamp(2, 4);
+        let active_humans = players_count.clamp(0, 4);
         for i in 0..4 {
             self.player_types[i] = if i < active_humans {
                 PlayerType::Human
@@ -307,12 +312,46 @@ impl UnoGame {
                 PlayerType::Disabled
             };
         }
-        if self.my_player_idx == 0 {
-            self.new_game();
-        } else {
-            self.init_from_seed(12345);
-            self.status_text = "Oczekiwanie na rozdanie kart przez hosta pokoju...".to_string();
+        self.deck.clear();
+        self.discard.clear();
+        for h in &mut self.hands {
+            h.clear();
         }
+        self.current_turn = 0;
+        self.direction = 1;
+        self.active_color = UnoColor::Red;
+        self.winner = None;
+        self.choosing_wild_card = None;
+        self.bot_wait_until = None;
+        self.newly_won = false;
+        self.outgoing_start_seed = None;
+        self.outgoing_play = None;
+        self.outgoing_draw = false;
+        self.status_text = if players_count < 2 {
+            "🌐 Poczekalnia — czekam na drugiego gracza...".to_string()
+        } else if self.my_player_idx == 0 {
+            "🌐 Wszyscy gotowi — kliknij 'Rozdaj karty'.".to_string()
+        } else {
+            "🌐 Czekam, aż gospodarz rozda karty...".to_string()
+        };
+    }
+
+    /// Host generuje ziarno i rozpoczyna rozdanie dla obecnych graczy.
+    pub fn host_start_online(&mut self) {
+        let seed: u64 = rand::thread_rng().gen();
+        self.online_lobby = false;
+        self.init_from_seed(seed);
+        self.outgoing_start_seed = Some(seed);
+    }
+
+    /// Odebranie rozdania od hosta.
+    pub fn apply_remote_start(&mut self, seed: u64) {
+        if !self.online_mode {
+            return;
+        }
+        self.online_lobby = false;
+        self.init_from_seed(seed);
+        self.outgoing_start_seed = None;
     }
 
     pub fn state_json(&self) -> Value {
@@ -655,8 +694,117 @@ impl UnoGame {
         }
     }
 
+    fn render_online_lobby(&mut self, ui: &mut egui::Ui, audio: &SoundManager) {
+        let full_rect = ui.available_rect_before_wrap();
+        ui.painter()
+            .rect_filled(full_rect, 12.0, egui::Color32::from_rgb(18, 24, 34));
+
+        let mut child_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(full_rect.shrink(18.0))
+                .layout(egui::Layout::top_down(egui::Align::Center)),
+        );
+        let ui = &mut child_ui;
+
+        ui.add_space(24.0);
+        ui.label(
+            egui::RichText::new("🌐 UNO — Poczekalnia")
+                .size(26.0)
+                .strong()
+                .color(egui::Color32::WHITE),
+        );
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Karty zostaną rozdane dopiero po starcie gospodarza.")
+                .size(15.0)
+                .color(egui::Color32::from_rgb(180, 195, 215)),
+        );
+        ui.add_space(20.0);
+
+        let active = self
+            .player_types
+            .iter()
+            .filter(|t| **t != PlayerType::Disabled)
+            .count();
+        ui.label(
+            egui::RichText::new(format!("Gracze przy stole: {}/4", active))
+                .size(18.0)
+                .strong()
+                .color(egui::Color32::GOLD),
+        );
+        ui.add_space(12.0);
+
+        for p in 0..4 {
+            if self.player_types[p] == PlayerType::Disabled {
+                continue;
+            }
+            let you = p == self.my_player_idx;
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgb(30, 36, 48))
+                .rounding(10.0)
+                .inner_margin(10.0)
+                .show(ui, |ui| {
+                    ui.set_width((full_rect.width() - 80.0).clamp(180.0, 360.0));
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(Self::player_name(p))
+                                .size(17.0)
+                                .strong()
+                                .color(Self::player_accent(p)),
+                        );
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.label(
+                                    egui::RichText::new(if you { "🧑 Ty" } else { "🌐 Online" })
+                                        .size(13.0)
+                                        .color(egui::Color32::LIGHT_GRAY),
+                                );
+                            },
+                        );
+                    });
+                });
+            ui.add_space(6.0);
+        }
+
+        ui.add_space(18.0);
+        ui.label(
+            egui::RichText::new(&self.status_text)
+                .size(16.0)
+                .color(egui::Color32::from_rgb(235, 225, 160)),
+        );
+
+        if active < 2 {
+            ui.add_space(14.0);
+            ui.label(
+                egui::RichText::new("⏳ Czekam na co najmniej 2 graczy...")
+                    .size(16.0)
+                    .color(egui::Color32::GOLD),
+            );
+        } else if self.my_player_idx == 0 {
+            ui.add_space(16.0);
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("🃏 Rozdaj karty").size(19.0).strong(),
+                    )
+                    .min_size(egui::vec2(260.0, 48.0)),
+                )
+                .clicked()
+            {
+                audio.play(Sfx::CardSlide);
+                self.host_start_online();
+            }
+        }
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, audio: &SoundManager) {
         let now = Instant::now();
+
+        if self.online_mode && self.online_lobby {
+            self.render_online_lobby(ui, audio);
+            return;
+        }
 
         if !self.online_mode
             && self.winner.is_none()
@@ -708,12 +856,21 @@ impl UnoGame {
 
         ui.horizontal_wrapped(|ui| {
             if !self.online_mode || self.my_player_idx == 0 {
+                let deal_label = if self.online_mode {
+                    "↻ Rozdaj ponownie"
+                } else {
+                    "↻ Nowe rozdanie"
+                };
                 if ui
-                    .button(egui::RichText::new("↻ Nowe rozdanie").size((15.0 * scale).max(12.5)))
+                    .button(egui::RichText::new(deal_label).size((15.0 * scale).max(12.5)))
                     .clicked()
                 {
                     audio.play(Sfx::CardSlide);
-                    self.new_game();
+                    if self.online_mode {
+                        self.host_start_online();
+                    } else {
+                        self.new_game();
+                    }
                 }
                 ui.separator();
             }

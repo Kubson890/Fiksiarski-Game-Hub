@@ -1,6 +1,7 @@
 use eframe::egui;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use rand::SeedableRng;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Suit {
@@ -113,7 +114,7 @@ pub struct Deck {
 }
 
 impl Deck {
-    pub fn new_shuffled() -> Self {
+    fn all_cards() -> Vec<Card> {
         let suits = [Suit::Hearts, Suit::Diamonds, Suit::Clubs, Suit::Spades];
         let ranks = [
             Rank::Ace, Rank::Two, Rank::Three, Rank::Four, Rank::Five, Rank::Six, Rank::Seven,
@@ -126,10 +127,22 @@ impl Deck {
                 cards.push(Card::new(suit, rank, true));
             }
         }
+        cards
+    }
 
+    pub fn new_shuffled() -> Self {
+        let mut cards = Self::all_cards();
         let mut rng = thread_rng();
         cards.shuffle(&mut rng);
+        Self { cards }
+    }
 
+    /// Tasowanie deterministyczne – dzięki temu obaj gracze online
+    /// otrzymują dokładnie te same karty z tego samego ziarna.
+    pub fn new_seeded(seed: u64) -> Self {
+        let mut cards = Self::all_cards();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        cards.shuffle(&mut rng);
         Self { cards }
     }
 

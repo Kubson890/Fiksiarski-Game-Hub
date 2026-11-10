@@ -62,9 +62,11 @@ pub struct LudoGame {
     status_text: String,
     pub newly_won: bool,
     pub online_mode: bool,
+    pub online_lobby: bool,
     pub my_player_idx: usize,
     pub outgoing_roll: Option<u8>,
     pub outgoing_pawn: Option<usize>,
+    pub outgoing_start: bool,
 }
 
 impl Default for LudoGame {
@@ -85,9 +87,11 @@ impl Default for LudoGame {
             status_text: String::new(),
             newly_won: false,
             online_mode: false,
+            online_lobby: false,
             my_player_idx: 0,
             outgoing_roll: None,
             outgoing_pawn: None,
+            outgoing_start: false,
         };
         g.new_game();
         g
@@ -108,19 +112,59 @@ impl LudoGame {
         self.status_text = "🔴 Czerwony zaczyna! Rzuć kostką.".to_string();
     }
 
+    /// Ustawia grę online na podstawie faktycznie obecnych graczy.
+    /// Nie zakłada żadnego drugiego gracza i nie startuje rozgrywki –
+    /// dopóki host nie kliknie startu, wszyscy widzą poczekalnię.
     pub fn setup_online(&mut self, my_idx: usize, players_count: usize) {
         self.online_mode = true;
+        self.online_lobby = true;
         self.my_player_idx = my_idx.min(3);
-        let active_humans = players_count.clamp(2, 4);
+        let active_humans = players_count.clamp(0, 4);
         for i in 0..4 {
-            // W trybie Online NIE MA BOTÓW: aktywni są tylko żywi gracze, reszta miejsc jest Disabled!
+            // W trybie Online NIE MA BOTÓW: aktywni są tylko żywi gracze.
             self.player_types[i] = if i < active_humans {
                 PlayerType::Human
             } else {
                 PlayerType::Disabled
             };
         }
+        self.pawns = [[0; 4]; 4];
+        self.current_turn = 0;
+        self.dice_value = 1;
+        self.phase = TurnPhase::WaitForRoll;
+        self.step_anim = None;
+        self.bot_wait_until = None;
+        self.newly_won = false;
+        self.outgoing_roll = None;
+        self.outgoing_pawn = None;
+        self.outgoing_start = false;
+        self.status_text = if players_count < 2 {
+            "🌐 Poczekalnia — czekam na drugiego gracza...".to_string()
+        } else if self.my_player_idx == 0 {
+            "🌐 Wszyscy gotowi — kliknij 'Rozpocznij grę'.".to_string()
+        } else {
+            "🌐 Czekam, aż gospodarz rozpocznie grę...".to_string()
+        };
+    }
+
+    /// Host rozpoczyna rozgrywkę dla aktualnie obecnych graczy.
+    pub fn start_online(&mut self) {
+        if !self.online_mode || !self.online_lobby {
+            return;
+        }
+        self.online_lobby = false;
         self.new_game();
+        self.outgoing_start = true;
+    }
+
+    /// Odebranie startu od hosta.
+    pub fn apply_remote_start(&mut self) {
+        if !self.online_mode {
+            return;
+        }
+        self.online_lobby = false;
+        self.new_game();
+        self.outgoing_start = false;
     }
 
     pub fn state_json(&self) -> Value {
@@ -475,8 +519,113 @@ impl LudoGame {
         best_pawn
     }
 
+    fn render_online_lobby(&mut self, ui: &mut egui::Ui, audio: &SoundManager) {
+        let full_rect = ui.available_rect_before_wrap();
+        ui.painter()
+            .rect_filled(full_rect, 12.0, egui::Color32::from_rgb(25, 28, 35));
+
+        let mut child_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(full_rect.shrink(18.0))
+                .layout(egui::Layout::top_down(egui::Align::Center)),
+        );
+        let ui = &mut child_ui;
+
+        ui.add_space(24.0);
+        ui.label(
+            egui::RichText::new("🌐 Chińczyk — Poczekalnia")
+                .size(26.0)
+                .strong()
+                .color(egui::Color32::WHITE),
+        );
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Gra startuje dopiero, gdy gospodarz ją rozpocznie.")
+                .size(15.0)
+                .color(egui::Color32::from_rgb(180, 195, 215)),
+        );
+        ui.add_space(20.0);
+
+        let active = self.player_types.iter().filter(|t| **t != PlayerType::Disabled).count();
+        ui.label(
+            egui::RichText::new(format!("Gracze przy stole: {}/4", active))
+                .size(18.0)
+                .strong()
+                .color(egui::Color32::GOLD),
+        );
+        ui.add_space(12.0);
+
+        for p in 0..4 {
+            if self.player_types[p] == PlayerType::Disabled {
+                continue;
+            }
+            let you = p == self.my_player_idx;
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgb(36, 40, 48))
+                .rounding(10.0)
+                .inner_margin(10.0)
+                .show(ui, |ui| {
+                    ui.set_width((full_rect.width() - 80.0).clamp(180.0, 360.0));
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(Self::player_name(p))
+                                .size(17.0)
+                                .strong()
+                                .color(Self::player_color(p)),
+                        );
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.label(
+                                    egui::RichText::new(if you { "🧑 Ty" } else { "🌐 Online" })
+                                        .size(13.0)
+                                        .color(egui::Color32::LIGHT_GRAY),
+                                );
+                            },
+                        );
+                    });
+                });
+            ui.add_space(6.0);
+        }
+
+        ui.add_space(18.0);
+        ui.label(
+            egui::RichText::new(&self.status_text)
+                .size(16.0)
+                .color(egui::Color32::from_rgb(235, 225, 160)),
+        );
+
+        if active < 2 {
+            ui.add_space(14.0);
+            ui.label(
+                egui::RichText::new("⏳ Czekam na co najmniej 2 graczy...")
+                    .size(16.0)
+                    .color(egui::Color32::GOLD),
+            );
+        } else if self.my_player_idx == 0 {
+            ui.add_space(16.0);
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("▶ Rozpocznij grę").size(19.0).strong(),
+                    )
+                    .min_size(egui::vec2(260.0, 48.0)),
+                )
+                .clicked()
+            {
+                audio.play(Sfx::Click);
+                self.start_online();
+            }
+        }
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, audio: &SoundManager) {
         let now = Instant::now();
+
+        if self.online_mode && self.online_lobby {
+            self.render_online_lobby(ui, audio);
+            return;
+        }
 
         if let TurnPhase::RollingDice {
             start,
