@@ -390,6 +390,8 @@ def homepage():
             <div class="card"><div class="icon">🚢</div><div class="name">Statki</div></div>
             <div class="card"><div class="icon">🃏</div><div class="name">Pasjans</div></div>
             <div class="card"><div class="icon">🎰</div><div class="name">Blackjack</div></div>
+            <div class="card"><div class="icon">🎴</div><div class="name">UNO</div></div>
+            <div class="card"><div class="icon">🌍</div><div class="name">Państwa-Miasta</div></div>
         </div>
 
         <div class="version-badge">
@@ -412,7 +414,7 @@ def homepage():
     </div>
 
     <footer>
-        &copy; 2025 Fiksiarski Game Hub &nbsp;|&nbsp;
+        &copy; 2026 Fiksiarski Game Hub &nbsp;|&nbsp;
         <a href="/admin">Panel Admina</a>
     </footer>
 </body>
