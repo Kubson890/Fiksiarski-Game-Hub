@@ -64,6 +64,7 @@ room_nicks: Dict[str, Dict[int, str]] = {r: {} for r in DEFAULT_ROOMS}
 room_resets: Dict[str, Dict[int, dict | None]] = {
     r: {0: None, 1: None, 2: None} for r in DEFAULT_ROOMS
 }
+room_game_seats: Dict[str, Dict[str, list[int]]] = {r: {} for r in DEFAULT_ROOMS}
 
 TWO_PLAYER_GAMES = {"chess", "battleship", "war"}
 ROOM_GAMES = {"ludo", "uno", "categories"}
@@ -606,10 +607,8 @@ def _slot_focus(room_id: str, slot: int) -> str | None:
 def _pair_active(room_id: str, pair: int, game: str) -> bool:
     if pair not in (0, 1):
         return False
-    return (
-        _slot_focus(room_id, pair * 2) == game
-        and _slot_focus(room_id, pair * 2 + 1) == game
-    )
+    focused = _slots_with_focus(room_id, game)
+    return len(focused) >= (pair + 1) * 2
 
 
 def _slots_with_focus(room_id: str, game: str) -> list[int]:
@@ -633,6 +632,7 @@ async def _announce_leave(room_id: str, slot: int, nick: str, game: str) -> None
     if game in ROOM_GAMES:
         if not _slots_with_focus(room_id, game):
             room_resets[room_id][2] = None
+            room_game_seats.setdefault(room_id, {})[game] = []
             await _broadcast_json(
                 room_id,
                 {"type": "GameClosed", "game": game, "pair": 2},
@@ -834,11 +834,24 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
 
             pair_event_game = PAIR_EVENT_GAMES.get(event_type)
             if pair_event_game is not None:
-                if not _pair_active(room_id, pair, pair_event_game):
+                focused = _slots_with_focus(room_id, pair_event_game)
+                if free_slot not in focused:
                     continue
-                # Wojnę prowadzi gospodarz stołu (młodszy slot w parze).
-                if pair_event_game == "war" and event_type in {"WarStart", "WarStep"} and free_slot % 2 != 0:
+                slot_pos = focused.index(free_slot)
+                game_pair = slot_pos // 2
+                game_seat = slot_pos % 2
+                table_slots = focused[game_pair * 2 : (game_pair + 1) * 2]
+
+                if len(table_slots) < 2 and event_type not in {"ChessReady", "BattleshipReady", "WarReady"}:
                     continue
+
+                # Wojnę rozpoczyna gospodarz stołu (młodszy slot w parze).
+                if pair_event_game == "war" and event_type == "WarStart" and game_seat != 0:
+                    continue
+
+                pair = game_pair
+                parsed["pair"] = game_pair
+                parsed["from_seat"] = game_seat
 
             room_event_game = ROOM_EVENT_GAMES.get(event_type)
             if room_event_game is not None:
@@ -846,19 +859,26 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     continue
                 focused_slots = _slots_with_focus(room_id, room_event_game)
                 if event_type in {"LudoStart", "UnoStart", "CategoriesStart"}:
-                    if not focused_slots or focused_slots[0] != free_slot:
+                    if not focused_slots:
                         continue
+                    active_starter = room_game_seats.setdefault(room_id, {}).get(room_event_game, [])
+                    allowed_host = active_starter[0] if (active_starter and active_starter[0] in focused_slots) else focused_slots[0]
+                    if free_slot != allowed_host:
+                        continue
+                    room_game_seats[room_id][room_event_game] = list(focused_slots)
                 if room_event_game == "categories" and event_type in {
                     "CategoriesStop",
                     "CategoriesSubmit",
                     "CategoriesVote",
                 }:
-                    # Miejsce w grze zawsze wylicza serwer – klient nie może
-                    # podszyć się pod innego gracza.
-                    try:
-                        parsed["from_room_seat"] = focused_slots.index(free_slot)
-                    except ValueError:
-                        continue
+                    active_seats = room_game_seats.setdefault(room_id, {}).get("categories", [])
+                    if free_slot in active_seats:
+                        parsed["from_room_seat"] = active_seats.index(free_slot)
+                    else:
+                        try:
+                            parsed["from_room_seat"] = focused_slots.index(free_slot)
+                        except ValueError:
+                            continue
                 parsed["pair"] = 2
 
             broadcast_to_all = False
@@ -898,6 +918,8 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                     if claimed and claimed != game:
                         continue
                     room_resets[room_id][reset_key] = None
+                    if reset_key == 2:
+                        room_game_seats.setdefault(room_id, {})[game] = []
                     broadcast_to_all = True
 
                 parsed["game"] = game
@@ -945,8 +967,8 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 game = str(parsed.get("game", ""))
                 if game in ROOM_GAMES:
                     recipients = _slots_with_focus(room_id, game)
-            elif pair_event_game == "war" or event_type in {"ChessReady", "BattleshipReady"}:
-                recipients = [s for s in (pair * 2, pair * 2 + 1) if s in rooms[room_id]]
+            elif pair_event_game is not None:
+                recipients = _slots_with_focus(room_id, pair_event_game)
 
             if recipients is None:
                 target_slots = list(rooms[room_id].keys())

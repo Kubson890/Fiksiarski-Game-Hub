@@ -354,6 +354,58 @@ impl UnoGame {
         self.outgoing_start_seed = None;
     }
 
+    /// Obsługa wyjścia gracza w trakcie gry UNO.
+    /// Jeśli zostanie co najmniej 2 graczy, gra toczy się dalej, a karty wychodzącego wracają do puli.
+    pub fn handle_player_left(&mut self, player_idx: usize, audio: &SoundManager) {
+        if player_idx >= 4 || self.player_types[player_idx] == PlayerType::Disabled {
+            return;
+        }
+
+        // 1. Oznacz gracza jako wyłączonego
+        self.player_types[player_idx] = PlayerType::Disabled;
+
+        // 2. Karty gracza trafiają do puli kart odrzuconych (aby nie blokować talii)
+        self.discard.extend(self.hands[player_idx].drain(..));
+
+        // 3. Sprawdź liczbę pozostałych aktywnych graczy
+        let remaining: Vec<usize> = (0..4)
+            .filter(|&i| self.player_types[i] != PlayerType::Disabled)
+            .collect();
+
+        if remaining.len() < 2 {
+            // Został tylko 1 gracz - wygrywa natychmiast!
+            if let Some(&sole_winner) = remaining.first() {
+                self.winner = Some(sole_winner);
+                if sole_winner == self.my_player_idx {
+                    self.newly_won = true;
+                    audio.play(Sfx::Win);
+                } else {
+                    audio.play(Sfx::Lose);
+                }
+                self.status_text = format!(
+                    "🏆 Pozostali gracze opuścili stół! Zwycięża {}!",
+                    Self::player_name(sole_winner)
+                );
+            }
+        } else {
+            // Zostało przynajmniej 2 graczy - gra toczy się dalej!
+            if self.current_turn == player_idx {
+                self.current_turn = self.next_active_player(player_idx, 1);
+                self.status_text = format!(
+                    "🚪 Gracz {} opuścił stół. Kolej na: {}",
+                    Self::player_name(player_idx),
+                    Self::player_name(self.current_turn)
+                );
+            } else {
+                self.status_text = format!(
+                    "🚪 Gracz {} opuścił stół. Gra toczy się dalej!",
+                    Self::player_name(player_idx)
+                );
+            }
+            self.schedule_bot_if_needed();
+        }
+    }
+
     pub fn state_json(&self) -> Value {
         let player_types: Vec<&str> = self
             .player_types
@@ -956,7 +1008,11 @@ impl UnoGame {
                     );
 
                     let role_tag = if is_disabled {
-                        "Wolne"
+                        if self.online_mode && !self.online_lobby {
+                            "Opuścił grę"
+                        } else {
+                            "Wolne"
+                        }
                     } else if (self.online_mode && p == self.my_player_idx)
                         || (!self.online_mode && p == 0)
                     {

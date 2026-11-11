@@ -46,6 +46,7 @@ pub struct ChessGame {
     pub outgoing_ready: bool,
     pub enemy_present: bool,
     start_sent: bool,
+    pub opponent_nick: Option<String>,
 }
 
 impl Default for ChessGame {
@@ -75,6 +76,7 @@ impl Default for ChessGame {
             outgoing_ready: false,
             enemy_present: false,
             start_sent: false,
+            opponent_nick: None,
         };
         game.update_status();
         game
@@ -106,6 +108,7 @@ impl ChessGame {
         self.opponent_ready = false;
         self.outgoing_ready = false;
         self.start_sent = false;
+        self.opponent_nick = None;
         self.my_online_color = if player_idx == 1 {
             Color::Black
         } else {
@@ -148,7 +151,7 @@ impl ChessGame {
     }
 
     pub fn mark_ready(&mut self, audio: &SoundManager) {
-        if !self.online_mode || !self.online_lobby || self.my_ready {
+        if !self.online_mode || !self.online_lobby || self.my_ready || !self.enemy_present {
             return;
         }
         audio.play(Sfx::Click);
@@ -606,12 +609,18 @@ impl ChessGame {
         } else {
             "⏳ Niegotowy"
         };
+        let opp_name = self.opponent_nick.as_deref().unwrap_or("Przeciwnik");
         let opp_label = if !self.enemy_present {
             "❌ Brak przeciwnika"
         } else if self.opponent_ready {
             "✅ Gotowy"
         } else {
             "⏳ Niegotowy"
+        };
+        let opp_display = if self.enemy_present {
+            format!("🌐 {} ({}): {}", opp_name, opp_color_name, opp_label)
+        } else {
+            format!("🌐 Przeciwnik ({}): ❌ Brak gracza (czeka na dołączenie)", opp_color_name)
         };
 
         egui::Frame::none()
@@ -635,7 +644,7 @@ impl ChessGame {
             .show(ui, |ui| {
                 ui.set_width((full_rect.width() - 100.0).clamp(200.0, 380.0));
                 ui.label(
-                    egui::RichText::new(format!("🌐 Przeciwnik ({}): {}", opp_color_name, opp_label))
+                    egui::RichText::new(opp_display)
                         .size(17.0)
                         .strong()
                         .color(egui::Color32::WHITE),
@@ -645,7 +654,7 @@ impl ChessGame {
         ui.add_space(20.0);
         if !self.enemy_present {
             ui.label(
-                egui::RichText::new("⏳ Czekam na drugiego gracza ze stolika...")
+                egui::RichText::new("⏳ Czekam, aż drugi gracz kliknie w szachy...")
                     .size(16.0)
                     .color(egui::Color32::GOLD),
             );
@@ -656,12 +665,19 @@ impl ChessGame {
                     .color(egui::Color32::GOLD),
             );
         } else {
+            let can_ready = self.enemy_present;
+            let btn_text = if can_ready {
+                "✅ Jestem gotowy"
+            } else {
+                "⏳ Czekam na drugiego gracza..."
+            };
             if ui
-                .add(
+                .add_enabled(
+                    can_ready,
                     egui::Button::new(
-                        egui::RichText::new("✅ Jestem gotowy").size(19.0).strong(),
+                        egui::RichText::new(btn_text).size(19.0).strong(),
                     )
-                    .min_size(egui::vec2(260.0, 48.0)),
+                    .min_size(egui::vec2(280.0, 48.0)),
                 )
                 .clicked()
             {

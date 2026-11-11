@@ -19,8 +19,6 @@ const MAIN_TRACK: [(usize, usize); 52] = [
     (0, 7), (0, 6),
 ];
 
-const SAFE_GLOB_INDICES: [usize; 8] = [0, 8, 13, 21, 26, 34, 39, 47];
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PlayerType {
     Human,
@@ -261,6 +259,64 @@ impl LudoGame {
         self.outgoing_pawn = None;
     }
 
+    /// Obsługa wyjścia gracza w trakcie rozgrywki online.
+    /// Jeśli zostanie co najmniej 2 graczy, gra toczy się dalej, a pionki wychodzącego znikają.
+    pub fn handle_player_left(&mut self, player_idx: usize, audio: &SoundManager) {
+        if player_idx >= 4 || self.player_types[player_idx] == PlayerType::Disabled {
+            return;
+        }
+
+        // 1. Oznacz gracza jako wyłączonego
+        self.player_types[player_idx] = PlayerType::Disabled;
+
+        // 2. Pionki wychodzącego gracza znikają z planszy
+        self.pawns[player_idx] = [0; 4];
+
+        // Anuluj animację, jeśli należała do gracza, który wyszedł
+        if let Some(anim) = &self.step_anim {
+            if anim.player == player_idx {
+                self.step_anim = None;
+            }
+        }
+
+        // 3. Sprawdź liczbę pozostałych aktywnych graczy
+        let remaining: Vec<usize> = (0..4)
+            .filter(|&i| self.player_types[i] != PlayerType::Disabled)
+            .collect();
+
+        if remaining.len() < 2 {
+            // Został tylko 1 gracz - wygrywa natychmiast!
+            if let Some(&sole_winner) = remaining.first() {
+                self.phase = TurnPhase::GameOver(sole_winner);
+                if sole_winner == self.my_player_idx {
+                    self.newly_won = true;
+                    audio.play(Sfx::Win);
+                } else {
+                    audio.play(Sfx::Lose);
+                }
+                self.status_text = format!(
+                    "🏆 Pozostali gracze opuścili grę! Zwycięża {}!",
+                    Self::player_name(sole_winner)
+                );
+            }
+        } else {
+            // Zostało przynajmniej 2 graczy - gra toczy się dalej!
+            if self.current_turn == player_idx {
+                self.advance_turn();
+                self.status_text = format!(
+                    "🚪 Gracz {} opuścił grę. Kolej na: {}",
+                    Self::player_name(player_idx),
+                    Self::player_name(self.current_turn)
+                );
+            } else {
+                self.status_text = format!(
+                    "🚪 Gracz {} opuścił grę. Gra toczy się dalej!",
+                    Self::player_name(player_idx)
+                );
+            }
+        }
+    }
+
     fn player_name(p: usize) -> &'static str {
         match p {
             0 => "🔴 Czerwony",
@@ -391,18 +447,16 @@ impl LudoGame {
         let mut captured_any = false;
 
         if let Some(target_glob) = Self::rel_to_global(player, final_pos) {
-            if !SAFE_GLOB_INDICES.contains(&target_glob) {
-                for other_p in 0..4 {
-                    if other_p == player || self.player_types[other_p] == PlayerType::Disabled {
-                        continue;
-                    }
-                    for other_pawn in 0..4 {
-                        let other_pos = self.pawns[other_p][other_pawn];
-                        if let Some(other_glob) = Self::rel_to_global(other_p, other_pos) {
-                            if other_glob == target_glob {
-                                self.pawns[other_p][other_pawn] = 0;
-                                captured_any = true;
-                            }
+            for other_p in 0..4 {
+                if other_p == player || self.player_types[other_p] == PlayerType::Disabled {
+                    continue;
+                }
+                for other_pawn in 0..4 {
+                    let other_pos = self.pawns[other_p][other_pawn];
+                    if let Some(other_glob) = Self::rel_to_global(other_p, other_pos) {
+                        if other_glob == target_glob {
+                            self.pawns[other_p][other_pawn] = 0;
+                            captured_any = true;
                         }
                     }
                 }
@@ -492,19 +546,15 @@ impl LudoGame {
                 score += 600;
             }
             if let Some(glob) = Self::rel_to_global(player, next) {
-                if !SAFE_GLOB_INDICES.contains(&glob) {
-                    for other_p in 0..4 {
-                        if other_p == player || self.player_types[other_p] == PlayerType::Disabled {
-                            continue;
-                        }
-                        for &other_pos in &self.pawns[other_p] {
-                            if Self::rel_to_global(other_p, other_pos) == Some(glob) {
-                                score += 800;
-                            }
+                for other_p in 0..4 {
+                    if other_p == player || self.player_types[other_p] == PlayerType::Disabled {
+                        continue;
+                    }
+                    for &other_pos in &self.pawns[other_p] {
+                        if Self::rel_to_global(other_p, other_pos) == Some(glob) {
+                            score += 800;
                         }
                     }
-                } else {
-                    score += 120;
                 }
             }
 
@@ -1077,7 +1127,13 @@ impl LudoGame {
                                                 "🌐 Online"
                                             }
                                         }
-                                        _ => "⛔ Wolne",
+                                        _ => {
+                                            if self.online_lobby {
+                                                "⛔ Wolne"
+                                            } else {
+                                                "🚪 Opuścił grę"
+                                            }
+                                        }
                                     };
                                     ui.label(
                                         egui::RichText::new(label)
@@ -1190,18 +1246,13 @@ impl LudoGame {
 
             painter.rect(r, 0.0, tile_fill, stroke);
 
-            if SAFE_GLOB_INDICES.contains(&glob_idx) {
-                let star_col = if matches!(glob_idx, 0 | 13 | 26 | 39) {
-                    egui::Color32::WHITE
-                } else {
-                    egui::Color32::from_rgb(160, 150, 135)
-                };
+            if matches!(glob_idx, 0 | 13 | 26 | 39) {
                 painter.text(
                     r.center(),
                     egui::Align2::CENTER_CENTER,
                     "★",
                     egui::FontId::proportional((cell * 0.55).max(10.0)),
-                    star_col,
+                    egui::Color32::WHITE,
                 );
             }
         }

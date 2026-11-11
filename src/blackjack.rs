@@ -295,26 +295,34 @@ impl BlackjackGame {
             ui.vertical_centered(|ui| {
                 match self.state {
                     GameState::Betting | GameState::Finished => {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
-                            ui.spacing_mut().item_spacing.y = 8.0;
+                        let btn_w = 96.0;
+                        let spacing = 10.0;
+                        let total_w = 4.0 * btn_w + 3.0 * spacing;
+
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = spacing;
+                            let pad = ((ui.available_width() - total_w) / 2.0).max(0.0);
+                            ui.add_space(pad);
                             for &bet in &[10, 50, 100, 250] {
                                 let enabled = self.chips >= bet;
-                                if ui
-                                    .add_enabled(
-                                        enabled,
-                                        egui::Button::new(format!("Stawka {}", bet))
-                                            .min_size(egui::vec2(80.0, 36.0)),
-                                    )
-                                    .clicked()
-                                {
+                                let is_selected = self.current_bet == bet;
+                                let mut text = egui::RichText::new(format!("Stawka {}", bet)).size(15.0);
+                                if is_selected {
+                                    text = text.strong().color(egui::Color32::GOLD);
+                                }
+                                let mut btn = egui::Button::new(text)
+                                    .min_size(egui::vec2(btn_w, 38.0));
+                                if is_selected {
+                                    btn = btn.fill(egui::Color32::from_rgb(45, 95, 65));
+                                }
+                                if ui.add_enabled(enabled, btn).clicked() {
                                     audio.play(Sfx::ChipBet);
                                     self.current_bet = bet;
                                 }
                             }
                         });
 
-                        ui.add_space(12.0);
+                        ui.add_space(14.0);
 
                         if ui
                             .add_enabled(
@@ -322,7 +330,7 @@ impl BlackjackGame {
                                 egui::Button::new(
                                     egui::RichText::new("🃏 Rozdaj karty").size(18.0).strong(),
                                 )
-                                .min_size(egui::vec2(200.0, 44.0)),
+                                .min_size(egui::vec2(220.0, 46.0)),
                             )
                             .clicked()
                         {
@@ -330,15 +338,20 @@ impl BlackjackGame {
                         }
                     }
                     GameState::PlayerTurn => {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
-                            ui.spacing_mut().item_spacing.y = 8.0;
+                        let btn_w = 140.0;
+                        let spacing = 10.0;
+                        let total_w = 3.0 * btn_w + 2.0 * spacing;
+
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = spacing;
+                            let pad = ((ui.available_width() - total_w) / 2.0).max(0.0);
+                            ui.add_space(pad);
                             if ui
                                 .add(
                                     egui::Button::new(
                                         egui::RichText::new("➕ Dobierz (Hit)").size(16.0),
                                     )
-                                    .min_size(egui::vec2(120.0, 40.0)),
+                                    .min_size(egui::vec2(btn_w, 42.0)),
                                 )
                                 .clicked()
                             {
@@ -350,7 +363,7 @@ impl BlackjackGame {
                                     egui::Button::new(
                                         egui::RichText::new("✋ Pasuj (Stand)").size(16.0),
                                     )
-                                    .min_size(egui::vec2(120.0, 40.0)),
+                                    .min_size(egui::vec2(btn_w, 42.0)),
                                 )
                                 .clicked()
                             {
@@ -366,7 +379,7 @@ impl BlackjackGame {
                                     egui::Button::new(
                                         egui::RichText::new("✖2 Podwój (Double)").size(16.0),
                                     )
-                                    .min_size(egui::vec2(120.0, 40.0)),
+                                    .min_size(egui::vec2(btn_w, 42.0)),
                                 )
                                 .clicked()
                             {

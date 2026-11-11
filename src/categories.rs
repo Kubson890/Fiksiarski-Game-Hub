@@ -27,6 +27,7 @@ pub struct CategoriesGame {
     pub letter: char,
     pub round: u32,
     pub active_players: usize,
+    pub player_active: [bool; 4],
     pub my_player_idx: usize,
     pub my_inputs: [String; 5],
     pub submitted: [bool; 4],
@@ -56,6 +57,7 @@ impl Default for CategoriesGame {
             letter: 'A',
             round: 1,
             active_players: 2,
+            player_active: [true, true, false, false],
             my_player_idx: 0,
             my_inputs: Default::default(),
             submitted: [false; 4],
@@ -84,6 +86,10 @@ impl CategoriesGame {
     pub fn setup_online(&mut self, my_idx: usize, players_count: usize) {
         self.my_player_idx = my_idx.min(3);
         self.active_players = players_count.clamp(1, 4);
+        self.player_active = [false; 4];
+        for i in 0..self.active_players {
+            self.player_active[i] = true;
+        }
         self.phase = CatPhase::Lobby;
         self.round = 1;
         self.total_scores = [0; 4];
@@ -181,8 +187,10 @@ impl CategoriesGame {
         self.all_answers[from_seat] = answers;
         self.submitted[from_seat] = true;
 
-        let active = self.active_players.clamp(1, 4);
-        if (0..active).all(|p| self.submitted[p]) && self.phase == CatPhase::Writing {
+        let all_ready = (0..4)
+            .filter(|&p| self.player_active[p])
+            .all(|p| self.submitted[p]);
+        if all_ready && self.phase == CatPhase::Writing {
             self.enter_voting_phase(audio);
         }
     }
@@ -240,14 +248,16 @@ impl CategoriesGame {
         self.votes[from_seat] = matrix;
         self.voted[from_seat] = true;
 
-        let active = self.active_players.clamp(1, 4);
-        if (0..active).all(|p| self.voted[p]) && self.phase == CatPhase::Voting {
+        let all_voted = (0..4)
+            .filter(|&p| self.player_active[p])
+            .all(|p| self.voted[p]);
+        if all_voted && self.phase == CatPhase::Voting {
             self.calculate_scores_and_finish_round(audio);
         }
     }
 
     pub fn required_yes_votes(&self) -> usize {
-        let active = self.active_players.clamp(2, 4);
+        let active = (0..4).filter(|&p| self.player_active[p]).count();
         match active {
             4 => 3,
             3 => 2,
@@ -256,9 +266,8 @@ impl CategoriesGame {
     }
 
     pub fn yes_votes_for(&self, target_player: usize, cat_idx: usize) -> usize {
-        let active = self.active_players.clamp(1, 4);
-        (0..active)
-            .filter(|&voter| self.votes[voter][target_player][cat_idx])
+        (0..4)
+            .filter(|&voter| self.player_active[voter] && self.votes[voter][target_player][cat_idx])
             .count()
     }
 
@@ -271,46 +280,54 @@ impl CategoriesGame {
     }
 
     fn calculate_scores_and_finish_round(&mut self, audio: &SoundManager) {
-        let active = self.active_players.clamp(1, 4);
         self.round_points = [[0; 5]; 4];
 
         for c in 0..5 {
             let mut approved = [false; 4];
             let mut norm_words: [String; 4] = Default::default();
-            for p in 0..active {
+            for p in 0..4 {
+                if !self.player_active[p] {
+                    continue;
+                }
                 if self.is_answer_approved(p, c) {
                     approved[p] = true;
                     norm_words[p] = self.all_answers[p][c].trim().to_lowercase();
                 }
             }
 
-            let total_approved = (0..active).filter(|&p| approved[p]).count();
-            for p in 0..active {
+            let total_approved = (0..4).filter(|&p| self.player_active[p] && approved[p]).count();
+            for p in 0..4 {
+                if !self.player_active[p] {
+                    continue;
+                }
                 if !approved[p] {
                     self.round_points[p][c] = 0;
                 } else if total_approved == 1 {
                     self.round_points[p][c] = 15;
                 } else {
-                    let same_count = (0..active)
-                        .filter(|&other| approved[other] && norm_words[other] == norm_words[p])
+                    let same_count = (0..4)
+                        .filter(|&other| self.player_active[other] && approved[other] && norm_words[other] == norm_words[p])
                         .count();
                     self.round_points[p][c] = if same_count > 1 { 5 } else { 10 };
                 }
             }
         }
 
-        for p in 0..active {
-            let sum: i32 = self.round_points[p].iter().sum();
-            self.total_scores[p] += sum;
+        for p in 0..4 {
+            if self.player_active[p] {
+                let sum: i32 = self.round_points[p].iter().sum();
+                self.total_scores[p] += sum;
+            }
         }
 
         if self.round >= MAX_ROUNDS {
             self.phase = CatPhase::GameOver;
-            let max_score = (0..active)
+            let max_score = (0..4)
+                .filter(|&p| self.player_active[p])
                 .map(|p| self.total_scores[p])
                 .max()
                 .unwrap_or(0);
-            let i_won = self.my_player_idx < active
+            let i_won = self.player_active[self.my_player_idx]
                 && self.total_scores[self.my_player_idx] == max_score
                 && max_score > 0;
             if i_won {
@@ -333,6 +350,63 @@ impl CategoriesGame {
         }
     }
 
+    /// Obsługa wyjścia gracza w trakcie Państw-Miast.
+    /// Jeśli zostanie co najmniej 2 graczy, gra toczy się dalej, a brakujące głosy/odpowiedzi nie blokują gry.
+    pub fn handle_player_left(&mut self, player_idx: usize, audio: &SoundManager) {
+        if player_idx >= 4 || !self.player_active[player_idx] {
+            return;
+        }
+
+        // 1. Oznacz gracza jako nieaktywnego
+        self.player_active[player_idx] = false;
+
+        // Jeśli to ten gracz zatrzymał rundę, zdejmij blokadę
+        if self.stopper_player == Some(player_idx) {
+            self.stopper_player = None;
+        }
+
+        // 2. Policz pozostałych aktywnych graczy
+        let remaining: Vec<usize> = (0..4).filter(|&i| self.player_active[i]).collect();
+
+        if remaining.len() < 2 {
+            // Został tylko 1 gracz - wygrywa natychmiast!
+            self.phase = CatPhase::GameOver;
+            let sole_winner = remaining.first().copied().unwrap_or(self.my_player_idx);
+            if sole_winner == self.my_player_idx {
+                self.newly_won = true;
+                audio.play(Sfx::Win);
+            } else {
+                audio.play(Sfx::Lose);
+            }
+            self.status_text = format!(
+                "🏆 Pozostali gracze opuścili pokój! Zwycięża Gracz #{}!",
+                sole_winner + 1
+            );
+        } else {
+            self.status_text = format!(
+                "🚪 Gracz #{} opuścił pokój. Gra toczy się dalej!",
+                player_idx + 1
+            );
+
+            // Sprawdź czy gra czekała na tego gracza, aby przejść do kolejnej fazy
+            match self.phase {
+                CatPhase::Writing => {
+                    let all_remaining_submitted = remaining.iter().all(|&p| self.submitted[p]);
+                    if all_remaining_submitted {
+                        self.enter_voting_phase(audio);
+                    }
+                }
+                CatPhase::Voting => {
+                    let all_remaining_voted = remaining.iter().all(|&p| self.voted[p]);
+                    if all_remaining_voted {
+                        self.calculate_scores_and_finish_round(audio);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn state_json(&self) -> Value {
         json!({
             "cat_sync": true,
@@ -340,6 +414,7 @@ impl CategoriesGame {
             "letter": self.letter.to_string(),
             "round": self.round,
             "active_players": self.active_players,
+            "player_active": self.player_active,
             "submitted": self.submitted,
             "all_answers": self.all_answers,
             "votes": self.votes,
@@ -404,6 +479,16 @@ impl CategoriesGame {
                                 self.apply_remote_vote(p, rem_votes[p], audio);
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        if let Some(act_val) = state.get("player_active") {
+            if let Ok(rem_act) = serde_json::from_value::<[bool; 4]>(act_val.clone()) {
+                for p in 0..4 {
+                    if !rem_act[p] && self.player_active[p] {
+                        self.handle_player_left(p, audio);
                     }
                 }
             }
@@ -500,7 +585,7 @@ impl CategoriesGame {
                                 self.round,
                                 MAX_ROUNDS,
                                 self.required_yes_votes(),
-                                self.active_players.clamp(2, 4)
+                                (0..4).filter(|&p| self.player_active[p]).count().max(2)
                             ))
                             .size((17.5 * scale).max(13.5))
                             .strong()
@@ -527,7 +612,7 @@ impl CategoriesGame {
                     .spacing([gap, gap])
                     .show(ui, |ui| {
                         for p in 0..4 {
-                            let active = p < self.active_players;
+                            let active = self.player_active[p];
                             let (rect, _) = ui.allocate_exact_size(
                                 egui::vec2(box_w, box_h),
                                 egui::Sense::hover(),
@@ -559,7 +644,11 @@ impl CategoriesGame {
                             );
 
                             let title = if !active {
-                                format!("Gracz #{} (Wolne)", p + 1)
+                                if self.phase == CatPhase::Lobby {
+                                    format!("Gracz #{} (Wolne)", p + 1)
+                                } else {
+                                    format!("Gracz #{} (Opuścił)", p + 1)
+                                }
                             } else if p == self.my_player_idx {
                                 format!("Gracz #{} (TY)", p + 1)
                             } else {
@@ -827,7 +916,7 @@ impl CategoriesGame {
     }
 
     fn render_voting(&mut self, ui: &mut egui::Ui, scale: f32, audio: &SoundManager) {
-        let active = self.active_players.clamp(2, 4);
+        let active = (0..4).filter(|&p| self.player_active[p]).count().max(1);
         let req_votes = self.required_yes_votes();
         let outer_w = ui.available_width();
         let pad = (14.0 * scale).max(8.0);
@@ -876,7 +965,10 @@ impl CategoriesGame {
                                             .color(egui::Color32::GOLD),
                                     ),
                                 );
-                                for p in 0..active {
+                                for p in 0..4 {
+                                    if !self.player_active[p] {
+                                        continue;
+                                    }
                                     ui.add_sized(
                                         [player_col_w, 26.0 * scale],
                                         egui::Label::new(
@@ -904,7 +996,10 @@ impl CategoriesGame {
                                         ),
                                     );
 
-                                    for p in 0..active {
+                                    for p in 0..4 {
+                                        if !self.player_active[p] {
+                                            continue;
+                                        }
                                         let word = self.all_answers[p][c_idx].trim();
                                         let valid_letter = word.chars().count() >= 2
                                             && Self::is_valid_prefix(word, self.letter);
@@ -983,7 +1078,7 @@ impl CategoriesGame {
     }
 
     fn render_summary(&mut self, ui: &mut egui::Ui, scale: f32, audio: &SoundManager) {
-        let active = self.active_players.clamp(2, 4);
+        let active = (0..4).filter(|&p| self.player_active[p]).count().max(1);
         let req_votes = self.required_yes_votes();
         let outer_w = ui.available_width();
         let pad = (14.0 * scale).max(8.0);
@@ -1019,7 +1114,10 @@ impl CategoriesGame {
                                             .color(egui::Color32::GOLD),
                                     ),
                                 );
-                                for p in 0..active {
+                                for p in 0..4 {
+                                    if !self.player_active[p] {
+                                        continue;
+                                    }
                                     ui.add_sized(
                                         [player_col_w, 26.0 * scale],
                                         egui::Label::new(
@@ -1047,7 +1145,10 @@ impl CategoriesGame {
                                         ),
                                     );
 
-                                    for p in 0..active {
+                                    for p in 0..4 {
+                                        if !self.player_active[p] {
+                                            continue;
+                                        }
                                         let word = self.all_answers[p][c_idx].trim();
                                         let pts = self.round_points[p][c_idx];
                                         let yes_cnt = self.yes_votes_for(p, c_idx);
@@ -1086,7 +1187,8 @@ impl CategoriesGame {
 
                 ui.add_space(14.0 * scale);
 
-                if self.my_player_idx == 0 {
+                let host_idx = (0..4).find(|&p| self.player_active[p]).unwrap_or(0);
+                if self.my_player_idx == host_idx {
                     let next_round = if self.phase == CatPhase::GameOver {
                         1
                     } else {
@@ -1118,9 +1220,12 @@ impl CategoriesGame {
                     }
                 } else {
                     ui.label(
-                        egui::RichText::new("Czekam aż Gracz #1 rozpocznie kolejną rundę...")
-                            .size((14.5 * scale).max(12.0))
-                            .color(egui::Color32::LIGHT_GRAY),
+                        egui::RichText::new(format!(
+                            "Czekam aż Gracz #{} rozpocznie kolejną rundę...",
+                            host_idx + 1
+                        ))
+                        .size((14.5 * scale).max(12.0))
+                        .color(egui::Color32::LIGHT_GRAY),
                     );
                 }
             });

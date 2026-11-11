@@ -46,6 +46,9 @@ pub struct WarGame {
     start_sent: bool,
     pub outgoing_ready: bool,
     pub outgoing_start_seed: Option<u64>,
+    pub my_step_confirmed: bool,
+    pub opponent_step_confirmed: bool,
+    pub opponent_nick: Option<String>,
 }
 
 impl Default for WarGame {
@@ -73,6 +76,9 @@ impl Default for WarGame {
             start_sent: false,
             outgoing_ready: false,
             outgoing_start_seed: None,
+            my_step_confirmed: false,
+            opponent_step_confirmed: false,
+            opponent_nick: None,
         };
         g.new_game();
         g
@@ -80,6 +86,19 @@ impl Default for WarGame {
 }
 
 impl WarGame {
+    pub fn opponent_display_name(&self) -> &str {
+        if self.online_mode {
+            if let Some(nick) = &self.opponent_nick {
+                let trimmed = nick.trim();
+                if !trimmed.is_empty() {
+                    return trimmed;
+                }
+            }
+            "Gracz 2"
+        } else {
+            "Bot"
+        }
+    }
     fn deal_from_deck(&mut self, deck: Deck, seat: usize) {
         let mut even: VecDeque<Card> = VecDeque::new();
         let mut odd: VecDeque<Card> = VecDeque::new();
@@ -112,6 +131,8 @@ impl WarGame {
         self.rounds = 0;
         self.newly_won = false;
         self.outgoing_step = false;
+        self.my_step_confirmed = false;
+        self.opponent_step_confirmed = false;
     }
 
     pub fn new_game(&mut self) {
@@ -130,9 +151,12 @@ impl WarGame {
         self.my_ready = false;
         self.opponent_ready = false;
         self.enemy_present = false;
+        self.opponent_nick = None;
         self.start_sent = false;
         self.outgoing_ready = false;
         self.outgoing_start_seed = None;
+        self.my_step_confirmed = false;
+        self.opponent_step_confirmed = false;
         self.clear_table();
         self.status_text = "🌐 Poczekalnia — potwierdź gotowość, aby zagrać.".to_string();
     }
@@ -145,6 +169,10 @@ impl WarGame {
     pub fn set_enemy_present(&mut self, present: bool) {
         if self.enemy_present != present {
             self.enemy_present = present;
+            if !present {
+                self.opponent_ready = false;
+                self.my_ready = false;
+            }
             if self.online_mode && self.online_lobby {
                 self.update_lobby_status();
             }
@@ -153,20 +181,23 @@ impl WarGame {
 
     fn update_lobby_status(&mut self) {
         if !self.enemy_present {
-            self.status_text = "⏳ Czekam na drugiego gracza przy stole...".to_string();
-        } else if self.my_ready && self.opponent_ready {
-            self.status_text = "✅ Obaj gotowi — rozdaję karty...".to_string();
-        } else if self.my_ready {
-            self.status_text = "⏳ Czekam, aż przeciwnik potwierdzi gotowość...".to_string();
-        } else if self.opponent_ready {
-            self.status_text = "🔥 Przeciwnik jest gotowy — potwierdź i Ty!".to_string();
+            self.status_text = "⏳ Czekam, aż drugi gracz kliknie w wojnę...".to_string();
         } else {
-            self.status_text = "Obaj gracze są przy stole — potwierdźcie gotowość.".to_string();
+            let opp = self.opponent_display_name().to_string();
+            if self.my_ready && self.opponent_ready {
+                self.status_text = "✅ Obaj gotowi — rozdaję karty...".to_string();
+            } else if self.my_ready {
+                self.status_text = format!("⏳ Czekam, aż {} potwierdzi gotowość...", opp);
+            } else if self.opponent_ready {
+                self.status_text = format!("🔥 {} jest gotowy — potwierdź i Ty!", opp);
+            } else {
+                self.status_text = "Obaj gracze są przy stole — potwierdźcie gotowość.".to_string();
+            }
         }
     }
 
     pub fn mark_ready(&mut self, audio: &SoundManager) {
-        if !self.online_mode || !self.online_lobby || self.my_ready {
+        if !self.online_mode || !self.online_lobby || self.my_ready || !self.enemy_present {
             return;
         }
         audio.play(Sfx::Check);
@@ -201,10 +232,13 @@ impl WarGame {
     fn begin_online(&mut self, seed: u64) {
         self.online_lobby = false;
         self.clear_table();
+        self.my_step_confirmed = false;
+        self.opponent_step_confirmed = false;
         let deck = Deck::new_seeded(seed);
         self.deal_from_deck(deck, self.my_seat);
+        let opp = self.opponent_display_name().to_string();
         self.status_text =
-            "🃏 Karty rozdane! Odkrywajcie karty — Ty albo przeciwnik.".to_string();
+            format!("🃏 Karty rozdane! Zagraj kartę — ruch potwierdzają obaj gracze (Ty i {}).", opp);
     }
 
     pub fn apply_remote_start(&mut self, seed: u64) {
@@ -215,11 +249,37 @@ impl WarGame {
         self.outgoing_start_seed = None;
     }
 
-    pub fn apply_remote_step(&mut self, audio: &SoundManager) {
-        if !self.online_mode || self.online_lobby {
+    pub fn confirm_my_step(&mut self, audio: &SoundManager) {
+        if !self.online_mode || self.my_step_confirmed || self.winner.is_some() || self.anim.is_some() {
             return;
         }
-        self.play_step(audio);
+        audio.play(Sfx::CardSlide);
+        self.my_step_confirmed = true;
+        self.outgoing_step = true;
+
+        if self.opponent_step_confirmed {
+            self.my_step_confirmed = false;
+            self.opponent_step_confirmed = false;
+            self.play_step(audio);
+        } else {
+            let opp = self.opponent_display_name().to_string();
+            self.status_text = format!("✅ Karta zagrana — czekasz na ruch gracza {}...", opp);
+        }
+    }
+
+    pub fn apply_remote_step(&mut self, from_seat: usize, audio: &SoundManager) {
+        if !self.online_mode || self.online_lobby || from_seat == self.my_seat {
+            return;
+        }
+        self.opponent_step_confirmed = true;
+        if self.my_step_confirmed && self.anim.is_none() {
+            self.my_step_confirmed = false;
+            self.opponent_step_confirmed = false;
+            self.play_step(audio);
+        } else {
+            let opp = self.opponent_display_name().to_string();
+            self.status_text = format!("⚡ {} zagrał kartę! Twój ruch!", opp);
+        }
     }
 
     fn flush_pending_collection(&mut self, audio: &SoundManager) {
@@ -313,12 +373,14 @@ impl WarGame {
 
         audio.play(Sfx::CardSlide);
 
+        let opp = self.opponent_display_name().to_string();
         if p_val > b_val {
             self.in_war_state = false;
             self.status_text = format!(
-                "✅ Twoja ({}{}) bije kartę wroga ({}{})! Zgarniasz {} kart!",
+                "✅ Twoja ({}{}) bije kartę {} ({}{})! Zgarniasz {} kart!",
                 p_card.rank.label(),
                 p_card.suit.symbol(),
+                opp,
                 b_card.rank.label(),
                 b_card.suit.symbol(),
                 pot_size
@@ -330,7 +392,8 @@ impl WarGame {
         } else if b_val > p_val {
             self.in_war_state = false;
             self.status_text = format!(
-                "❌ Tracisz! Wróg ({}{}) bije Twoją ({}{}) i zabiera {} kart.",
+                "❌ Tracisz! {} ({}{}) bije Twoją ({}{}) i zabiera {} kart.",
+                opp,
                 b_card.rank.label(),
                 b_card.suit.symbol(),
                 p_card.rank.label(),
@@ -397,12 +460,18 @@ impl WarGame {
         ui.add_space(20.0);
 
         let my_label = if self.my_ready { "✅ Gotowy" } else { "⏳ Niegotowy" };
+        let opp_name = self.opponent_display_name();
         let opp_label = if !self.enemy_present {
-            "❌ Brak przeciwnika"
+            "❌ Brak gracza (czeka na dołączenie)"
         } else if self.opponent_ready {
             "✅ Gotowy"
         } else {
             "⏳ Niegotowy"
+        };
+        let opp_display = if self.enemy_present {
+            format!("🌐 {}: {}", opp_name, opp_label)
+        } else {
+            "🌐 Przeciwnik: ❌ Brak gracza (czeka na dołączenie)".to_string()
         };
 
         egui::Frame::none()
@@ -426,7 +495,7 @@ impl WarGame {
             .show(ui, |ui| {
                 ui.set_width((full_rect.width() - 100.0).clamp(200.0, 380.0));
                 ui.label(
-                    egui::RichText::new(format!("🌐 Przeciwnik: {}", opp_label))
+                    egui::RichText::new(opp_display)
                         .size(17.0)
                         .strong()
                         .color(egui::Color32::WHITE),
@@ -449,11 +518,16 @@ impl WarGame {
             );
         } else {
             let can_ready = self.enemy_present;
+            let btn_text = if can_ready {
+                "✅ Jestem gotowy"
+            } else {
+                "⏳ Czekam na drugiego gracza..."
+            };
             if ui
                 .add_enabled(
                     can_ready,
                     egui::Button::new(
-                        egui::RichText::new("✅ Jestem gotowy").size(19.0).strong(),
+                        egui::RichText::new(btn_text).size(19.0).strong(),
                     )
                     .min_size(egui::vec2(260.0, 48.0)),
                 )
@@ -505,11 +579,25 @@ impl WarGame {
             }
         }
 
-        let can_act = if self.online_mode {
-            self.my_seat == 0 && self.enemy_present
+        let can_press = if self.online_mode {
+            self.enemy_present
+                && !self.my_step_confirmed
+                && self.anim.is_none()
+                && self.winner.is_none()
         } else {
-            true
+            self.anim.is_none() && self.winner.is_none()
         };
+
+        if self.online_mode
+            && self.my_step_confirmed
+            && self.opponent_step_confirmed
+            && self.anim.is_none()
+            && self.winner.is_none()
+        {
+            self.my_step_confirmed = false;
+            self.opponent_step_confirmed = false;
+            self.play_step(audio);
+        }
 
         if self.auto_play && !self.online_mode && self.winner.is_none() && self.anim.is_none() {
             if now.duration_since(self.last_auto_step).as_millis() >= 180 {
@@ -519,13 +607,16 @@ impl WarGame {
             ui.ctx().request_repaint();
         }
 
-        if can_act
+        if can_press
             && ui.input(|i| i.key_pressed(egui::Key::Space))
             && self.winner.is_none()
             && self.anim.is_none()
         {
-            self.outgoing_step = self.online_mode;
-            self.play_step(audio);
+            if self.online_mode {
+                self.confirm_my_step(audio);
+            } else {
+                self.play_step(audio);
+            }
         }
 
         let full_rect = ui.available_rect_before_wrap();
@@ -545,15 +636,21 @@ impl WarGame {
 
         ui.horizontal_wrapped(|ui| {
             if self.online_mode {
+                let opp_name = self.opponent_display_name();
+                let status_label = if self.my_step_confirmed && self.opponent_step_confirmed {
+                    "🌐 Stół online — odsłaniam karty...".to_string()
+                } else if self.my_step_confirmed {
+                    format!("🌐 Stół online — czekasz na ruch {}", opp_name)
+                } else if self.opponent_step_confirmed {
+                    format!("🌐 Stół online — {} czeka na Twój ruch!", opp_name)
+                } else {
+                    format!("🌐 Stół online — pojedynek z {}", opp_name)
+                };
                 ui.label(
-                    egui::RichText::new(if self.my_seat == 0 {
-                        "🌐 Stół online — Ty odkrywasz"
-                    } else {
-                        "🌐 Stół online — czeka na przeciwnika"
-                    })
-                    .size(16.0)
-                    .strong()
-                    .color(egui::Color32::GOLD),
+                    egui::RichText::new(status_label)
+                        .size(16.0)
+                        .strong()
+                        .color(egui::Color32::GOLD),
                 );
             } else {
                 if ui
@@ -608,9 +705,10 @@ impl WarGame {
             bar_rect.center(),
             egui::Align2::CENTER_CENTER,
             format!(
-                "🧑 Ty: {}     |     {} Opon.: {}",
+                "🧑 Ty: {}     |     {} {}: {}",
                 p_cnt,
                 if self.online_mode { "🌐" } else { "🤖" },
+                self.opponent_display_name(),
                 b_cnt
             ),
             egui::FontId::proportional(14.0),
@@ -688,11 +786,22 @@ impl WarGame {
                 );
             }
             paint_card_at(ui.painter(), b_deck_rect, &dummy_back, false);
+            let opp_name = self.opponent_display_name();
+            let label = if self.online_mode {
+                if opp_name.chars().count() > 8 {
+                    let truncated: String = opp_name.chars().take(7).collect();
+                    format!("{}..", truncated)
+                } else {
+                    opp_name.to_uppercase()
+                }
+            } else {
+                "BOT".to_string()
+            };
             ui.painter().text(
                 b_deck_rect.center(),
                 egui::Align2::CENTER_CENTER,
-                format!("{}\n({})", if self.online_mode { "WRO." } else { "BOT" }, b_cnt),
-                egui::FontId::proportional((card_w * 0.22).max(14.0)),
+                format!("{}\n({})", label, b_cnt),
+                egui::FontId::proportional((card_w * 0.20).clamp(12.0, 18.0)),
                 egui::Color32::WHITE,
             );
         }
@@ -819,8 +928,22 @@ impl WarGame {
         );
 
         let mut btn_ui = ui.new_child(egui::UiBuilder::new().max_rect(btn_rect));
-        let btn_label = if self.online_mode && self.my_seat != 0 {
-            "⏳ Czekaj na ruch przeciwnika"
+        let btn_label = if self.online_mode {
+            if !self.enemy_present {
+                "⏳ Czekam na przeciwnika"
+            } else if self.my_step_confirmed {
+                "⏳ Czekaj na ruch przeciwnika..."
+            } else if self.opponent_step_confirmed {
+                if self.in_war_state {
+                    "🔥 ROZSTRZYGNIJ WOJNĘ! (przeciwnik czeka)"
+                } else {
+                    "🃏 Zagraj kartę (przeciwnik czeka!)"
+                }
+            } else if self.in_war_state {
+                "🔥 ROZSTRZYGNIJ WOJNĘ!"
+            } else {
+                "🃏 Zagraj kartę"
+            }
         } else if self.in_war_state {
             "🔥 ROZSTRZYGNIJ WOJNĘ!"
         } else {
@@ -829,14 +952,17 @@ impl WarGame {
 
         if btn_ui
             .add_enabled(
-                self.winner.is_none() && can_act && self.anim.is_none(),
+                can_press,
                 egui::Button::new(egui::RichText::new(btn_label).size(18.0).strong())
                     .min_size(btn_size),
             )
             .clicked()
         {
-            self.outgoing_step = self.online_mode;
-            self.play_step(audio);
+            if self.online_mode {
+                self.confirm_my_step(audio);
+            } else {
+                self.play_step(audio);
+            }
         }
     }
 }

@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use tungstenite::{connect, Message};
 use sha2::{Sha256, Digest};
 
-pub const APP_VERSION: &str = "0.8.0";
+pub const APP_VERSION: &str = "0.9.0";
 
 /// Twarde limity dla wywołań HTTP. Bez nich nieosiągalny serwer blokował
 /// wątek UI na czas retransmisji TCP (minuty), a system uznawał okno za
@@ -151,7 +151,12 @@ pub enum NetEvent {
         #[serde(default)]
         from_room_seat: usize,
     },
-    WarStep,
+    WarStep {
+        #[serde(default)]
+        from_seat: usize,
+        #[serde(default)]
+        pair: usize,
+    },
     /// Host pokoju rozpoczyna grę w Chińczyka dla aktualnie obecnych graczy.
     LudoStart,
     /// Gracz potwierdza gotowość do gry w Wojnę.
@@ -722,30 +727,69 @@ impl NetClient {
         self.game_focused_slots(game).len()
     }
 
+    /// Stolik gry 2-osobowej (0 lub 1) dla tego gracza spośród graczy mających otwartą daną grę.
+    pub fn two_player_pair(&self, game: &str) -> usize {
+        let focused = self.game_focused_slots(game);
+        if let Some(pos) = focused.iter().position(|&s| s == self.my_slot) {
+            pos / 2
+        } else {
+            self.my_pair()
+        }
+    }
+
+    /// Miejsce przy stoliku (0 = gospodarz, 1 = gość) spośród graczy mających otwartą daną grę.
+    pub fn two_player_seat(&self, game: &str) -> usize {
+        let focused = self.game_focused_slots(game);
+        if let Some(pos) = focused.iter().position(|&s| s == self.my_slot) {
+            pos % 2
+        } else {
+            self.my_pair_seat()
+        }
+    }
+
+    /// Slot przeciwnika przy stoliku danej gry 2-osobowej (tylko gdy przeciwnik faktycznie ma tę grę otwartą!).
+    pub fn two_player_opponent_slot(&self, game: &str) -> Option<usize> {
+        let focused = self.game_focused_slots(game);
+        let pos = focused.iter().position(|&s| s == self.my_slot)?;
+        let table = pos / 2;
+        let seat = pos % 2;
+        let opp_pos = if seat == 0 { table * 2 + 1 } else { table * 2 };
+        focused.get(opp_pos).copied()
+    }
+
+    /// Czy stolik gry 2-osobowej gracza ma komplet 2 obecnych graczy?
+    pub fn two_player_table_active(&self, game: &str) -> bool {
+        self.two_player_opponent_slot(game).is_some()
+    }
+
     pub fn pair_active(&self, pair: usize, game: &str) -> bool {
         if self.connected_room.is_none() || pair > 1 {
             return false;
         }
-        self.slot_focus(pair * 2) == Some(game)
-            && self.slot_focus(pair * 2 + 1) == Some(game)
+        let focused = self.game_focused_slots(game);
+        focused.len() >= (pair + 1) * 2
     }
 
     pub fn my_pair_active(&self, game: &str) -> bool {
-        self.pair_active(self.my_pair(), game)
+        self.two_player_table_active(game)
     }
 
     pub fn playing_pair(&self, game: &str) -> Option<usize> {
-        if self.my_pair_active(game) {
-            Some(self.my_pair())
-        } else if self.pair_active(self.other_pair(), game) {
-            Some(self.other_pair())
+        let focused = self.game_focused_slots(game);
+        if focused.len() >= 2 {
+            Some(0)
         } else {
             None
         }
     }
 
     pub fn is_spectator_for_game(&self, game: &str) -> bool {
-        matches!(self.playing_pair(game), Some(pair) if pair != self.my_pair())
+        let focused = self.game_focused_slots(game);
+        if let Some(pos) = focused.iter().position(|&s| s == self.my_slot) {
+            pos >= 2 && focused.len() >= 2
+        } else {
+            false
+        }
     }
 
     pub fn spectator_count_for_game(&self, game: &str) -> usize {
@@ -1015,7 +1059,8 @@ impl NetClient {
         }
     }
 
-    pub fn render_leaderboard_ui(&mut self, ui: &mut egui::Ui) {
+    pub fn render_leaderboard_ui(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut go_back = false;
         let full_rect = ui.available_rect_before_wrap();
         ui.painter()
             .rect_filled(full_rect, 12.0, egui::Color32::from_rgb(22, 25, 34));
@@ -1048,6 +1093,13 @@ impl NetClient {
                 .clicked()
             {
                 self.fetch_leaderboard();
+            }
+            ui.add_space(10.0);
+            if ui
+                .button(egui::RichText::new("🔙 Wróć").size(header_font))
+                .clicked()
+            {
+                go_back = true;
             }
         });
 
@@ -1156,5 +1208,6 @@ impl NetClient {
                             });
                     });
             });
+        go_back
     }
 }
